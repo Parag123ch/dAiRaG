@@ -1,0 +1,8 @@
+sap-order-to-cash-dataset/neo4j/__pycache__/
+sap-order-to-cash-dataset/neo4j/*.log
+sap-order-to-cash-dataset/neo4j/*.err.log
+sap-order-to-cash-dataset/neo4j/graph_manifest.json
+sap-order-to-cash-dataset/neo4j/import/*.csv
+sap-order-to-cash-dataset/neo4j/explorer/data/graph_data.json
+sap-order-to-cash-dataset/combined/
+sap-order-to-cash-dataset/sap-o2c-data/
