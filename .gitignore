@@ -6,3 +6,7 @@ sap-order-to-cash-dataset/neo4j/import/*.csv
 sap-order-to-cash-dataset/neo4j/explorer/data/graph_data.json
 sap-order-to-cash-dataset/combined/
 sap-order-to-cash-dataset/sap-o2c-data/
+.env
+.env.*
+!.env.example
+

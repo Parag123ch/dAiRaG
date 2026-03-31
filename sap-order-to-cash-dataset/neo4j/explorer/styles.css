@@ -9,6 +9,9 @@
   --blue: #5a97ff;
   --blue-soft: #cfe4ff;
   --blue-deep: #1f7de4;
+  --violet: #8264ff;
+  --violet-deep: #6544ef;
+  --violet-soft: rgba(130, 100, 255, 0.24);
   --coral: #ff6e75;
   --coral-soft: rgba(255, 110, 117, 0.14);
   --shadow: 0 8px 28px rgba(13, 26, 52, 0.08);
@@ -22,6 +25,7 @@
 html,
 body {
   margin: 0;
+  height: 100%;
   min-height: 100%;
   background: var(--bg);
   color: var(--ink);
@@ -38,12 +42,19 @@ textarea {
 }
 
 .page-shell {
+  height: 100vh;
+  height: 100dvh;
   min-height: 100vh;
+  min-height: 100dvh;
+  max-height: 100vh;
+  max-height: 100dvh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .topbar {
+  flex: 0 0 88px;
   height: 88px;
   padding: 0 28px;
   display: flex;
@@ -97,25 +108,38 @@ textarea {
 }
 
 .workspace {
-  flex: 1;
+  flex: 1 1 auto;
+  height: calc(100vh - 88px);
+  height: calc(100dvh - 88px);
   min-height: 0;
+  max-height: calc(100vh - 88px);
+  max-height: calc(100dvh - 88px);
   display: grid;
   grid-template-columns: minmax(0, 1fr) 500px;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
   gap: 0;
+  overflow: hidden;
 }
 
 .graph-shell,
 .chat-shell {
+  height: 100%;
   min-height: 0;
+  max-height: 100%;
+  min-width: 0;
 }
 
 .graph-shell {
   padding: 18px 12px 18px 18px;
+  overflow: hidden;
 }
 
 .graph-stage {
   position: relative;
   height: 100%;
+  min-height: 0;
+  max-height: 100%;
   border: 1px solid var(--border);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(251, 252, 255, 0.98)),
@@ -370,23 +394,39 @@ textarea {
 }
 
 .chat-shell__body {
-  flex: 1;
+  flex: 1 1 auto;
+  height: 100%;
   min-height: 0;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-scroll-body {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-bottom: 20px;
+  padding: 18px 20px 0;
 }
 
 .chat-messages {
-  padding: 18px 20px 0;
   display: flex;
   flex-direction: column;
   gap: 22px;
+  min-width: 0;
+  padding-bottom: 20px;
 }
 
 .message {
   display: flex;
   gap: 14px;
+  min-width: 0;
 }
 
 .message--user {
@@ -400,21 +440,28 @@ textarea {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  background: #101010;
+  background: linear-gradient(135deg, var(--violet), var(--violet-deep));
   color: #ffffff;
+  font-size: 0.88rem;
   font-weight: 700;
+  letter-spacing: -0.02em;
+  box-shadow: 0 10px 18px rgba(101, 68, 239, 0.24);
 }
 
 .message--user .message__avatar {
-  background: #d0d5db;
+  background: linear-gradient(135deg, #ff6e75, #ff9096);
   color: #ffffff;
+  box-shadow: 0 10px 18px rgba(255, 110, 117, 0.22);
 }
 
 .message__body {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-width: 320px;
+  width: 100%;
+  min-width: 0;
+  max-width: min(320px, 100%);
 }
 
 .message__meta {
@@ -434,6 +481,7 @@ textarea {
 }
 
 .message__bubble {
+  max-width: 100%;
   padding: 14px 16px;
   border-radius: 18px;
   background: #ffffff;
@@ -442,24 +490,25 @@ textarea {
   line-height: 1.5;
   box-shadow: 0 8px 18px rgba(12, 25, 49, 0.06);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message--user .message__bubble {
-  background: #181818;
-  color: #ffffff;
-  border-color: #181818;
+  background: #ffffff;
+  color: #172032;
+  border-color: var(--border);
 }
 
 .chat-composer {
-  position: sticky;
-  bottom: 20px;
-  margin: 12px 20px 0;
+  margin: 12px 20px 20px;
   border: 1px solid #d7dde6;
   border-radius: 14px;
   background: #ffffff;
   box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
 }
 
 .chat-composer__status {
@@ -476,6 +525,14 @@ textarea {
   height: 10px;
   border-radius: 50%;
   background: #17c653;
+  box-shadow: 0 0 0 4px rgba(23, 198, 83, 0.16);
+  animation: chat-status-idle-pulse 1.6s ease-in-out infinite;
+}
+
+.chat-composer__status--thinking .chat-composer__dot {
+  background: #dc445b;
+  box-shadow: 0 0 0 6px rgba(220, 68, 91, 0.16);
+  animation: chat-status-pulse 1.1s ease-in-out infinite;
 }
 
 .chat-composer__label {
@@ -503,18 +560,66 @@ textarea {
 }
 
 .chat-composer__submit {
-  min-width: 90px;
-  height: 46px;
+  width: 52px;
+  height: 52px;
   border: 0;
-  border-radius: 14px;
-  background: #909090;
+  border-radius: 18px;
+  background: linear-gradient(135deg, var(--violet), var(--violet-deep));
   color: #ffffff;
+  box-shadow: 0 14px 28px rgba(101, 68, 239, 0.28);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease,
+    filter 140ms ease;
+}
+
+.chat-composer__submit:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 34px rgba(101, 68, 239, 0.34);
+  filter: saturate(1.06);
 }
 
 .chat-composer__submit:disabled {
   cursor: wait;
-  opacity: 0.7;
+  opacity: 0.72;
+  transform: none;
+  box-shadow: 0 10px 20px rgba(101, 68, 239, 0.2);
+}
+
+.chat-composer__submit-icon {
+  font-size: 1.55rem;
+  line-height: 1;
+  transform: translateX(1px);
+}
+
+@keyframes chat-status-idle-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 4px rgba(23, 198, 83, 0.16);
+  }
+
+  50% {
+    transform: scale(1.12);
+    box-shadow: 0 0 0 8px rgba(23, 198, 83, 0.08);
+  }
+}
+
+@keyframes chat-status-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 4px rgba(220, 68, 91, 0.16);
+  }
+
+  50% {
+    transform: scale(1.18);
+    box-shadow: 0 0 0 8px rgba(220, 68, 91, 0.08);
+  }
 }
 
 ::-webkit-scrollbar {
@@ -527,19 +632,15 @@ textarea {
   border-radius: 999px;
 }
 
-@media (max-width: 1280px) {
-  body {
-    overflow: auto;
-  }
-
+@media (max-width: 1080px) {
   .workspace {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(300px, 42vh);
   }
 
   .chat-shell {
     border-left: 0;
     border-top: 1px solid var(--border);
-    min-height: 520px;
   }
 
   .graph-shell {
@@ -547,13 +648,17 @@ textarea {
   }
 
   .graph-stage {
-    min-height: 720px;
+    min-height: 0;
   }
 }
 
 @media (max-width: 780px) {
   .topbar {
     padding: 0 18px;
+  }
+
+  .workspace {
+    grid-template-rows: minmax(0, 1fr) minmax(260px, 46vh);
   }
 
   .graph-toolbar,
@@ -569,3 +674,4 @@ textarea {
     transform: none;
   }
 }
+

@@ -4,20 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Order to Cash Graph Explorer</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=statusgreen1" />
   </head>
   <body>
     <div class="page-shell">
       <header class="topbar">
         <div class="topbar__left">
-          <button class="topbar__icon" type="button" aria-label="Mapping">
-            <span></span>
-            <span></span>
-          </button>
           <div class="topbar__path">
-            <span class="topbar__muted">Mapping</span>
-            <span class="topbar__slash">/</span>
-            <span class="topbar__title">Order to Cash</span>
+            <span class="topbar__title">dAiRaG</span>
           </div>
         </div>
       </header>
@@ -77,18 +71,19 @@
         <aside class="chat-shell">
           <div class="chat-shell__header">
             <div>
-              <h2>Chat with Graph</h2>
-              <p>Order to Cash</p>
+              <h2>Chat with dAi</h2>
             </div>
           </div>
 
-          <div id="chatScrollBody" class="chat-shell__body">
-            <div id="chatMessages" class="chat-messages"></div>
+          <div class="chat-shell__body">
+            <div id="chatScrollBody" class="chat-scroll-body">
+              <div id="chatMessages" class="chat-messages"></div>
+            </div>
 
             <form id="chatForm" class="chat-composer">
-              <div class="chat-composer__status">
-                <span class="chat-composer__dot"></span>
-                <span>dAi is awaiting instructions</span>
+              <div id="chatStatus" class="chat-composer__status">
+                <span id="chatStatusDot" class="chat-composer__dot"></span>
+                <span id="chatStatusText">dAi is awaiting instructions</span>
               </div>
               <label class="chat-composer__label" for="chatInput">Analyze anything</label>
               <textarea
@@ -98,8 +93,8 @@
                 rows="4"
               ></textarea>
               <div class="chat-composer__actions">
-                <button id="chatSubmitButton" class="chat-composer__submit" type="submit">
-                  Send
+                <button id="chatSubmitButton" class="chat-composer__submit" type="submit" aria-label="Send message">
+                  <span class="chat-composer__submit-icon" aria-hidden="true">&rarr;</span>
                 </button>
               </div>
             </form>
@@ -108,6 +103,6 @@
       </main>
     </div>
 
-    <script type="module" src="/static/app.js"></script>
+    <script type="module" src="/static/app.js?v=avataryou1"></script>
   </body>
 </html>

@@ -469,7 +469,7 @@ function getNeighborhood(nodeId, depth = 1) {
   return visited;
 }
 
-function focusNeighborhood(nodeId, depth = 1) {
+function focusNeighborhood(nodeId, depth = 1, options = {}) {
   const node = getNode(nodeId);
   if (!node) {
     return;
@@ -495,7 +495,9 @@ function focusNeighborhood(nodeId, depth = 1) {
   state.viewMode = "focus";
   state.activeFocusNodeId = nodeId;
   selectNode(nodeId, { center: false });
-  fitGraph();
+  if (options.fit !== false) {
+    fitGraph();
+  }
 }
 
 function expandNode(nodeId) {
@@ -810,7 +812,7 @@ function addChatMessage(role, content) {
 }
 
 function avatarText(role) {
-  return role === "assistant" ? "dA" : "";
+  return role === "assistant" ? "dAi" : "yOu";
 }
 
 function renderChatMessages() {
@@ -852,7 +854,7 @@ async function postChatMessage(message) {
 
 function applyChatResponse(response) {
   if (response.viewMode === "focus" && response.focusNodeId) {
-    focusNeighborhood(response.focusNodeId, response.focusDepth ?? 1);
+    focusNeighborhood(response.focusNodeId, response.focusDepth ?? 1, { fit: false });
     for (const nodeId of response.revealNodeIds ?? []) {
       addNodeVisible(nodeId);
     }
@@ -861,13 +863,19 @@ function applyChatResponse(response) {
     if (response.expandFocus) {
       expandNode(response.focusNodeId);
     }
-    fitGraph();
     return;
   }
 
   if (response.viewMode === "global") {
-    showFullGraph({ select: false });
+    showFullGraph({ select: false, fit: false });
   }
+}
+
+function setChatStatus(isThinking) {
+  elements.chatStatus.classList.toggle("chat-composer__status--thinking", isThinking);
+  elements.chatStatusText.textContent = isThinking
+    ? "dAi is thinking"
+    : "dAi is awaiting instructions";
 }
 
 async function handleChatSubmit(event) {
@@ -878,6 +886,7 @@ async function handleChatSubmit(event) {
   }
 
   state.pendingChat = true;
+  setChatStatus(true);
   elements.chatSubmitButton.disabled = true;
   addChatMessage("user", message);
   elements.chatInput.value = "";
@@ -890,12 +899,14 @@ async function handleChatSubmit(event) {
     addChatMessage("assistant", `I ran into an issue while reading the graph: ${error.message}`);
   } finally {
     state.pendingChat = false;
+    setChatStatus(false);
     elements.chatSubmitButton.disabled = false;
   }
 }
 
 function initializeChat() {
   state.chatMessages = [];
+  setChatStatus(false);
   addChatMessage(
     "assistant",
     "Hi! I can help you analyze the Order to Cash process. Ask about an order, invoice, payment, customer, product, or overall flow."
@@ -1351,7 +1362,10 @@ function collectElements() {
   elements.chatForm = byId("chatForm");
   elements.chatInput = byId("chatInput");
   elements.chatSubmitButton = byId("chatSubmitButton");
+  elements.chatStatus = byId("chatStatus");
+  elements.chatStatusText = byId("chatStatusText");
 }
+
 
 function bindEvents() {
   elements.graphCanvas.addEventListener("pointerdown", handlePointerDown);

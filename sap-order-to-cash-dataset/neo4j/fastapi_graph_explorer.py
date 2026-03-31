@@ -7,10 +7,17 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from runtime_config import runtime_status
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from cypher_chat import CypherChatEngine, CypherChatError
+from gemini_cypher_chat import GeminiCypherChatEngine
+from llm_cypher_chat import LlmCypherChatEngine
+from nvidia_cypher_chat import NvidiaCypherChatEngine
+from openrouter_cypher_chat import OpenRouterCypherChatEngine
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -562,6 +569,47 @@ def get_graph_store() -> GraphStore:
     return GraphStore(payload)
 
 
+@lru_cache(maxsize=1)
+def get_nvidia_cypher_chat_engine() -> NvidiaCypherChatEngine | None:
+    return NvidiaCypherChatEngine.from_env()
+
+
+@lru_cache(maxsize=1)
+def get_openrouter_cypher_chat_engine() -> OpenRouterCypherChatEngine | None:
+    return OpenRouterCypherChatEngine.from_env()
+
+
+@lru_cache(maxsize=1)
+def get_gemini_cypher_chat_engine() -> GeminiCypherChatEngine | None:
+    return GeminiCypherChatEngine.from_env()
+
+
+@lru_cache(maxsize=1)
+def get_llm_cypher_chat_engine() -> LlmCypherChatEngine | None:
+    return LlmCypherChatEngine.from_env()
+
+
+@lru_cache(maxsize=1)
+def get_cypher_chat_engine() -> CypherChatEngine | None:
+    return CypherChatEngine.from_env()
+
+
+def active_chat_mode() -> str:
+    runtime = runtime_status()
+    if runtime.get("llmCypherRuntimeReady"):
+        if get_nvidia_cypher_chat_engine() is not None:
+            return "llm_cypher"
+        if get_openrouter_cypher_chat_engine() is not None:
+            return "llm_cypher"
+        if get_gemini_cypher_chat_engine() is not None:
+            return "llm_cypher"
+        if get_llm_cypher_chat_engine() is not None:
+            return "llm_cypher"
+    if runtime.get("cypherRuntimeReady") and get_cypher_chat_engine() is not None:
+        return "cypher"
+    return "rule"
+
+
 app = FastAPI(title="SAP Order to Cash Graph Explorer")
 app.mount("/static", StaticFiles(directory=EXPLORER_DIR), name="static")
 
@@ -572,8 +620,12 @@ def read_index() -> FileResponse:
 
 
 @app.get("/api/health")
-def read_health() -> dict[str, str]:
-    return {"status": "ok"}
+def read_health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "chat_mode": active_chat_mode(),
+        "runtime": runtime_status(),
+    }
 
 
 @app.get("/api/graph")
@@ -590,6 +642,74 @@ def chat_with_graph(request: ChatRequest) -> dict[str, Any]:
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
     try:
-        return get_graph_store().build_chat_response(message)
+        runtime = runtime_status()
+        fallback_reasons: list[str] = []
+
+        if runtime.get("llmCypherRuntimeReady"):
+            nvidia_cypher_engine = get_nvidia_cypher_chat_engine()
+            if nvidia_cypher_engine is not None:
+                try:
+                    return nvidia_cypher_engine.execute(message)
+                except CypherChatError as exc:
+                    fallback_reasons.append(str(exc))
+
+            openrouter_cypher_engine = get_openrouter_cypher_chat_engine()
+            if openrouter_cypher_engine is not None:
+                try:
+                    response = openrouter_cypher_engine.execute(message)
+                    if fallback_reasons:
+                        response["warning"] = "The preferred NVIDIA Nemotron planner was unavailable, so the app used OpenRouter as the next available LLM planner."
+                        response["fallbackReasons"] = fallback_reasons
+                    return response
+                except CypherChatError as exc:
+                    fallback_reasons.append(str(exc))
+
+            gemini_cypher_engine = get_gemini_cypher_chat_engine()
+            if gemini_cypher_engine is not None:
+                try:
+                    response = gemini_cypher_engine.execute(message)
+                    if fallback_reasons:
+                        response["warning"] = "The preferred NVIDIA Nemotron planner was unavailable, so the app used the next available LLM planner."
+                        response["fallbackReasons"] = fallback_reasons
+                    return response
+                except CypherChatError as exc:
+                    fallback_reasons.append(str(exc))
+
+            llm_cypher_engine = get_llm_cypher_chat_engine()
+            if llm_cypher_engine is not None:
+                try:
+                    response = llm_cypher_engine.execute(message)
+                    if fallback_reasons:
+                        response["warning"] = "The preferred NVIDIA Nemotron planner was unavailable, so the app used the next available LLM planner."
+                        response["fallbackReasons"] = fallback_reasons
+                    return response
+                except CypherChatError as exc:
+                    fallback_reasons.append(str(exc))
+
+        if runtime.get("cypherRuntimeReady"):
+            cypher_engine = get_cypher_chat_engine()
+            if cypher_engine is not None:
+                try:
+                    response = cypher_engine.execute(message)
+                    if fallback_reasons:
+                        response["warning"] = "The LLM-to-Cypher planner was unavailable, so the app used the template Cypher fallback."
+                        response["fallbackReasons"] = fallback_reasons
+                    return response
+                except CypherChatError as exc:
+                    fallback_reasons.append(str(exc))
+
+        response = get_graph_store().build_chat_response(message)
+        response["queryMode"] = "rule"
+        response["cypher"] = None
+        response["cypherParams"] = {}
+        if fallback_reasons:
+            response["warning"] = "Live Cypher chat is temporarily unavailable, so the app used the local graph fallback."
+            response["fallbackReasons"] = fallback_reasons
+        return response
+    except CypherChatError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+
