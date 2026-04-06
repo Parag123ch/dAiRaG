@@ -11,7 +11,7 @@ A graph-grounded SAP Order-to-Cash analytics application that combines Neo4j, a 
 
 - Visualizes the SAP Order-to-Cash flow as an interactive graph.
 - Lets users ask natural-language questions and translates them into Cypher.
-- Answers questions with graph-grounded evidence from Neo4j and sales schedule lookups.
+- Answers questions with graph-grounded evidence from Neo4j.
 - Supports process exploration across customers, orders, deliveries, invoices, payments, plants, products, and journal entry items.
 - Captures traces, token usage, cost, and in-app LLM-as-judge evaluations with Langfuse.
 
@@ -20,8 +20,7 @@ A graph-grounded SAP Order-to-Cash analytics application that combines Neo4j, a 
 - Interactive graph explorer with focus, unfocus, reset view, metadata cards, zoom controls, and chat-driven graph updates.
 - Natural-language to Cypher pipeline backed by the Turing LLM gateway.
 - Safe deterministic fallback query engine when the LLM path fails or a query needs exact rule-based handling.
-- Product query rewriting and expansion for better retrieval of terms like `lip balm` / `lipbalm` and multi-product queries.
-- Schedule-line question support from sales data joins without forcing schedule lines into the graph model.
+- Query rewriting and expansion for better retrieval.
 - Langfuse tracing, usage metrics, cost tracking, and in-app judge scores for answer quality.
 - Dockerized local development setup plus a self-contained production image for deployment.
 
