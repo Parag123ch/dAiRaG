@@ -19,8 +19,9 @@ A graph-grounded SAP Order-to-Cash analytics application that combines Neo4j, a 
 
 - Interactive graph explorer with focus, unfocus, reset view, metadata cards, zoom controls, and chat-driven graph updates.
 - Natural-language to Cypher pipeline backed by the Turing LLM gateway.
-- Safe deterministic fallback query engine when the LLM path fails or a query needs exact rule-based handling.
+- Implemented input and output guardrails, including out-of-domain question fallback messages and grounded response handling.
 - Query rewriting and expansion for better retrieval.
+- Implemented Cypher generation and final response caching for repeated queries to improve consistency and reduce repeated inference overhead.
 - Langfuse tracing, usage metrics, cost tracking, and in-app judge scores for answer quality.
 - Dockerized local development setup plus a self-contained production image for deployment.
 
