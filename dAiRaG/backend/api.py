@@ -7,22 +7,21 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from runtime_config import runtime_status
+from .config import runtime_status
+from .observability import attach_trace_context, current_trace_id, current_trace_url, shutdown_langfuse, start_observation
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from cypher_chat import CypherChatEngine, CypherChatError
-from gemini_cypher_chat import GeminiCypherChatEngine
-from llm_cypher_chat import LlmCypherChatEngine
-from nvidia_cypher_chat import NvidiaCypherChatEngine
-from openrouter_cypher_chat import OpenRouterCypherChatEngine
+from .services.graph_query_engine import CypherChatEngine, CypherChatError, SalesScheduleLookupEngine
+from .services.turing_llm_engine import TuringCypherChatEngine
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-EXPLORER_DIR = SCRIPT_DIR / "explorer"
-GRAPH_DATA_PATH = EXPLORER_DIR / "data" / "graph_data.json"
+BACKEND_DIR = Path(__file__).resolve().parent
+SERVICE_ROOT = BACKEND_DIR.parent
+FRONTEND_DIR = SERVICE_ROOT / "frontend"
+GRAPH_DATA_PATH = FRONTEND_DIR / "data" / "graph_data.json"
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_|-]{2,}")
 STOPWORDS = {
@@ -46,6 +45,8 @@ STOPWORDS = {
     "about",
 }
 ENTITY_TYPE_KEYWORDS = {
+    "sales order": "Order",
+    "sales orders": "Order",
     "order": "Order",
     "orders": "Order",
     "delivery": "Delivery",
@@ -58,8 +59,16 @@ ENTITY_TYPE_KEYWORDS = {
     "customers": "Customer",
     "product": "Product",
     "products": "Product",
+    "plant": "Plant",
+    "plants": "Plant",
     "address": "Address",
     "addresses": "Address",
+    "journal entry": "JournalEntryItem",
+    "journal entries": "JournalEntryItem",
+    "journal entry item": "JournalEntryItem",
+    "journal entry items": "JournalEntryItem",
+    "accounting item": "JournalEntryItem",
+    "accounting items": "JournalEntryItem",
 }
 
 ENTITY_COUNT_FIELDS = {
@@ -69,7 +78,9 @@ ENTITY_COUNT_FIELDS = {
     "Payment": "Payment",
     "Customer": "Customer",
     "Product": "Product",
+    "Plant": "Plant",
     "Address": "Address",
+    "JournalEntryItem": "JournalEntryItem",
 }
 
 ENTITY_FIELD_PRIORITY = {
@@ -99,6 +110,15 @@ ENTITY_FIELD_PRIORITY = {
         "base_unit",
         "gross_weight",
         "net_weight",
+    ],
+    "Plant": [
+        "plant_id",
+        "plant_name",
+        "valuation_area",
+        "sales_organization",
+        "distribution_channel",
+        "division",
+        "address_id",
     ],
     "Order": [
         "order_id",
@@ -134,6 +154,18 @@ ENTITY_FIELD_PRIORITY = {
         "posting_date",
         "company_code",
     ],
+    "JournalEntryItem": [
+        "journal_entry_item_id",
+        "invoice_id",
+        "customer_id",
+        "accounting_document",
+        "accounting_document_item",
+        "gl_account",
+        "transaction_currency",
+        "amount_in_transaction_currency",
+        "clearing_payment_id",
+        "clearing_date",
+    ],
 }
 
 FIELD_KEYWORD_MAP = {
@@ -144,7 +176,7 @@ FIELD_KEYWORD_MAP = {
         "net_amount",
     },
     "currency": {"transaction_currency", "company_code_currency"},
-    "accounting": {"accounting_document", "invoice_accounting_document", "payment_document"},
+    "accounting": {"accounting_document", "accounting_document_item", "invoice_accounting_document", "payment_document"},
     "document": {
         "accounting_document",
         "invoice_accounting_document",
@@ -160,6 +192,12 @@ FIELD_KEYWORD_MAP = {
         "clearing_date",
         "creation_date",
     },
+    "gl account": {"gl_account"},
+    "profit center": {"profit_center"},
+    "cost center": {"cost_center"},
+    "plant name": {"plant_name"},
+    "valuation area": {"valuation_area"},
+    "journal": {"journal_entry_item_id", "accounting_document", "accounting_document_item"},
     "status": {
         "overall_delivery_status",
         "overall_goods_movement_status",
@@ -193,9 +231,21 @@ PROCESS_RELATIONSHIP_MAP = {
     ("Order", "Product"): {"CONTAINS_PRODUCT"},
     ("Delivery", "Product"): {"DELIVERS_PRODUCT"},
     ("Invoice", "Product"): {"BILLS_PRODUCT"},
+    ("Product", "Plant"): {"AVAILABLE_AT_PLANT"},
+    ("Plant", "Product"): {"AVAILABLE_AT_PLANT"},
     ("Product", "Order"): {"CONTAINS_PRODUCT"},
     ("Product", "Delivery"): {"DELIVERS_PRODUCT"},
     ("Product", "Invoice"): {"BILLS_PRODUCT"},
+    ("Customer", "JournalEntryItem"): {"HAS_JOURNAL_ENTRY_ITEM"},
+    ("JournalEntryItem", "Customer"): {"HAS_JOURNAL_ENTRY_ITEM"},
+    ("Invoice", "JournalEntryItem"): {"ACCOUNTED_AS"},
+    ("JournalEntryItem", "Invoice"): {"ACCOUNTED_AS"},
+    ("Payment", "JournalEntryItem"): {"CLEARS_JOURNAL_ENTRY_ITEM"},
+    ("JournalEntryItem", "Payment"): {"CLEARS_JOURNAL_ENTRY_ITEM"},
+    ("Order", "JournalEntryItem"): {"FULFILLED_BY", "INVOICED_AS", "ACCOUNTED_AS"},
+    ("JournalEntryItem", "Order"): {"ACCOUNTED_AS", "INVOICED_AS", "FULFILLED_BY"},
+    ("Delivery", "JournalEntryItem"): {"INVOICED_AS", "ACCOUNTED_AS"},
+    ("JournalEntryItem", "Delivery"): {"ACCOUNTED_AS", "INVOICED_AS"},
 }
 
 PROCESS_DEPTH_MAP = {
@@ -212,11 +262,48 @@ PROCESS_DEPTH_MAP = {
     ("Order", "Product"): 1,
     ("Delivery", "Product"): 1,
     ("Invoice", "Product"): 1,
+    ("Product", "Plant"): 1,
+    ("Plant", "Product"): 1,
+    ("Customer", "JournalEntryItem"): 1,
+    ("Invoice", "JournalEntryItem"): 1,
+    ("Payment", "JournalEntryItem"): 1,
+    ("Order", "JournalEntryItem"): 3,
+    ("Delivery", "JournalEntryItem"): 2,
+    ("JournalEntryItem", "Customer"): 1,
+    ("JournalEntryItem", "Invoice"): 1,
+    ("JournalEntryItem", "Payment"): 1,
+    ("JournalEntryItem", "Order"): 3,
+    ("JournalEntryItem", "Delivery"): 2,
 }
 
 
 class ChatRequest(BaseModel):
     message: str
+
+
+def _chat_observability_summary(response: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'queryMode': response.get('queryMode'),
+        'llmProvider': response.get('llmProvider'),
+        'focusNodeId': response.get('focusNodeId'),
+        'revealNodeCount': len(response.get('revealNodeIds') or []),
+        'evidenceNodeCount': len(response.get('evidenceNodeIds') or []),
+        'hasCypher': bool(response.get('cypher')),
+        'hasWarning': bool(response.get('warning')),
+    }
+
+
+def _attach_trace_metadata(response: dict[str, Any]) -> dict[str, Any]:
+    trace_id = current_trace_id()
+    if not trace_id:
+        return response
+
+    enriched = dict(response)
+    enriched['traceId'] = trace_id
+    trace_url = current_trace_url(trace_id)
+    if trace_url:
+        enriched['traceUrl'] = trace_url
+    return enriched
 
 
 class GraphStore:
@@ -430,7 +517,7 @@ class GraphStore:
         if any(keyword in lower for keyword in ["flow", "process", "journey", "path"]):
             return (
                 "This graph follows the order-to-cash process as "
-                "Customer -> Order -> Delivery -> Invoice -> Payment, with Product and Address linked as supporting context."
+                "Customer -> Order -> Delivery -> Invoice -> Payment, with Product, Plant, Address, and JournalEntryItem linked as supporting context."
             )
         return None
 
@@ -462,7 +549,7 @@ class GraphStore:
             return {
                 "reply": (
                     "I couldn't match that to a graph entity yet. Try an order, invoice, payment, "
-                    "customer, product, or address id from the dataset."
+                    "customer, product, plant, address, or journal entry item id from the dataset."
                 ),
                 "focusNodeId": None,
                 "revealNodeIds": [],
@@ -562,7 +649,7 @@ class GraphStore:
 def get_graph_store() -> GraphStore:
     if not GRAPH_DATA_PATH.exists():
         raise FileNotFoundError(
-            "Graph data file is missing. Run `python sap-order-to-cash-dataset/neo4j/build_o2c_graph.py` first."
+            "Graph data file is missing from the frontend bundle."
         )
     with GRAPH_DATA_PATH.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -570,23 +657,13 @@ def get_graph_store() -> GraphStore:
 
 
 @lru_cache(maxsize=1)
-def get_nvidia_cypher_chat_engine() -> NvidiaCypherChatEngine | None:
-    return NvidiaCypherChatEngine.from_env()
+def get_sales_schedule_lookup_engine() -> SalesScheduleLookupEngine | None:
+    return SalesScheduleLookupEngine.from_files()
 
 
 @lru_cache(maxsize=1)
-def get_openrouter_cypher_chat_engine() -> OpenRouterCypherChatEngine | None:
-    return OpenRouterCypherChatEngine.from_env()
-
-
-@lru_cache(maxsize=1)
-def get_gemini_cypher_chat_engine() -> GeminiCypherChatEngine | None:
-    return GeminiCypherChatEngine.from_env()
-
-
-@lru_cache(maxsize=1)
-def get_llm_cypher_chat_engine() -> LlmCypherChatEngine | None:
-    return LlmCypherChatEngine.from_env()
+def get_turing_cypher_chat_engine() -> TuringCypherChatEngine | None:
+    return TuringCypherChatEngine.from_env()
 
 
 @lru_cache(maxsize=1)
@@ -596,27 +673,25 @@ def get_cypher_chat_engine() -> CypherChatEngine | None:
 
 def active_chat_mode() -> str:
     runtime = runtime_status()
-    if runtime.get("llmCypherRuntimeReady"):
-        if get_nvidia_cypher_chat_engine() is not None:
-            return "llm_cypher"
-        if get_openrouter_cypher_chat_engine() is not None:
-            return "llm_cypher"
-        if get_gemini_cypher_chat_engine() is not None:
-            return "llm_cypher"
-        if get_llm_cypher_chat_engine() is not None:
-            return "llm_cypher"
+    if runtime.get("llmCypherRuntimeReady") and get_turing_cypher_chat_engine() is not None:
+        return "llm_cypher"
     if runtime.get("cypherRuntimeReady") and get_cypher_chat_engine() is not None:
         return "cypher"
     return "rule"
 
 
 app = FastAPI(title="SAP Order to Cash Graph Explorer")
-app.mount("/static", StaticFiles(directory=EXPLORER_DIR), name="static")
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+
+@app.on_event("shutdown")
+def shutdown_background_clients() -> None:
+    shutdown_langfuse()
 
 
 @app.get("/")
 def read_index() -> FileResponse:
-    return FileResponse(EXPLORER_DIR / "index.html")
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 
 @app.get("/api/health")
@@ -641,75 +716,78 @@ def chat_with_graph(request: ChatRequest) -> dict[str, Any]:
     message = request.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
-    try:
-        runtime = runtime_status()
-        fallback_reasons: list[str] = []
 
-        if runtime.get("llmCypherRuntimeReady"):
-            nvidia_cypher_engine = get_nvidia_cypher_chat_engine()
-            if nvidia_cypher_engine is not None:
-                try:
-                    return nvidia_cypher_engine.execute(message)
-                except CypherChatError as exc:
-                    fallback_reasons.append(str(exc))
+    with attach_trace_context(name="chat.request", tags=["api", "chat"]):
+        with start_observation(
+            name="chat.request",
+            as_type="span",
+            input={"message": message},
+            metadata={"route": "/api/chat"},
+        ) as observation:
+            try:
+                schedule_lookup_engine = get_sales_schedule_lookup_engine()
+                if schedule_lookup_engine is not None:
+                    schedule_response = schedule_lookup_engine.execute(message)
+                    if schedule_response is not None:
+                        schedule_response = _attach_trace_metadata(schedule_response)
+                        observation.update(
+                            output=_chat_observability_summary(schedule_response),
+                            metadata={"fallbackReasonCount": 0},
+                        )
+                        return schedule_response
 
-            openrouter_cypher_engine = get_openrouter_cypher_chat_engine()
-            if openrouter_cypher_engine is not None:
-                try:
-                    response = openrouter_cypher_engine.execute(message)
-                    if fallback_reasons:
-                        response["warning"] = "The preferred NVIDIA Nemotron planner was unavailable, so the app used OpenRouter as the next available LLM planner."
-                        response["fallbackReasons"] = fallback_reasons
-                    return response
-                except CypherChatError as exc:
-                    fallback_reasons.append(str(exc))
+                runtime = runtime_status()
+                fallback_reasons: list[str] = []
 
-            gemini_cypher_engine = get_gemini_cypher_chat_engine()
-            if gemini_cypher_engine is not None:
-                try:
-                    response = gemini_cypher_engine.execute(message)
-                    if fallback_reasons:
-                        response["warning"] = "The preferred NVIDIA Nemotron planner was unavailable, so the app used the next available LLM planner."
-                        response["fallbackReasons"] = fallback_reasons
-                    return response
-                except CypherChatError as exc:
-                    fallback_reasons.append(str(exc))
+                if runtime.get("llmCypherRuntimeReady"):
+                    turing_cypher_engine = get_turing_cypher_chat_engine()
+                    if turing_cypher_engine is not None:
+                        try:
+                            response = _attach_trace_metadata(turing_cypher_engine.execute(message))
+                            observation.update(
+                                output=_chat_observability_summary(response),
+                                metadata={"fallbackReasonCount": 0},
+                            )
+                            return response
+                        except CypherChatError as exc:
+                            fallback_reasons.append(str(exc))
 
-            llm_cypher_engine = get_llm_cypher_chat_engine()
-            if llm_cypher_engine is not None:
-                try:
-                    response = llm_cypher_engine.execute(message)
-                    if fallback_reasons:
-                        response["warning"] = "The preferred NVIDIA Nemotron planner was unavailable, so the app used the next available LLM planner."
-                        response["fallbackReasons"] = fallback_reasons
-                    return response
-                except CypherChatError as exc:
-                    fallback_reasons.append(str(exc))
+                if runtime.get("cypherRuntimeReady"):
+                    cypher_engine = get_cypher_chat_engine()
+                    if cypher_engine is not None:
+                        try:
+                            response = cypher_engine.execute(message)
+                            if fallback_reasons:
+                                response["warning"] = "The LLM-to-Cypher planner was unavailable, so the app used the template Cypher fallback."
+                                response["fallbackReasons"] = fallback_reasons
+                            response = _attach_trace_metadata(response)
+                            observation.update(
+                                output=_chat_observability_summary(response),
+                                metadata={"fallbackReasonCount": len(fallback_reasons)},
+                            )
+                            return response
+                        except CypherChatError as exc:
+                            fallback_reasons.append(str(exc))
 
-        if runtime.get("cypherRuntimeReady"):
-            cypher_engine = get_cypher_chat_engine()
-            if cypher_engine is not None:
-                try:
-                    response = cypher_engine.execute(message)
-                    if fallback_reasons:
-                        response["warning"] = "The LLM-to-Cypher planner was unavailable, so the app used the template Cypher fallback."
-                        response["fallbackReasons"] = fallback_reasons
-                    return response
-                except CypherChatError as exc:
-                    fallback_reasons.append(str(exc))
-
-        response = get_graph_store().build_chat_response(message)
-        response["queryMode"] = "rule"
-        response["cypher"] = None
-        response["cypherParams"] = {}
-        if fallback_reasons:
-            response["warning"] = "Live Cypher chat is temporarily unavailable, so the app used the local graph fallback."
-            response["fallbackReasons"] = fallback_reasons
-        return response
-    except CypherChatError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+                response = get_graph_store().build_chat_response(message)
+                response["queryMode"] = "rule"
+                response["cypher"] = None
+                response["cypherParams"] = {}
+                if fallback_reasons:
+                    response["warning"] = "Live Cypher chat is temporarily unavailable, so the app used the local graph fallback."
+                    response["fallbackReasons"] = fallback_reasons
+                response = _attach_trace_metadata(response)
+                observation.update(
+                    output=_chat_observability_summary(response),
+                    metadata={"fallbackReasonCount": len(fallback_reasons)},
+                )
+                return response
+            except CypherChatError as exc:
+                observation.update(output={"error": str(exc)})
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            except FileNotFoundError as exc:
+                observation.update(output={"error": str(exc)})
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 

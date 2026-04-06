@@ -6,12 +6,12 @@ from pathlib import Path
 import uvicorn
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_DATA_PATH = SCRIPT_DIR / "explorer" / "data" / "graph_data.json"
+SERVICE_ROOT = Path(__file__).resolve().parent
+DEFAULT_DATA_PATH = SERVICE_ROOT / "frontend" / "data" / "graph_data.json"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Serve the FastAPI SAP O2C graph explorer.")
+    parser = argparse.ArgumentParser(description="Run the dAiRaG FastAPI service.")
     parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind.")
     parser.add_argument("--port", type=int, default=8000, help="Port to listen on.")
     parser.add_argument(
@@ -26,17 +26,17 @@ def main() -> None:
     args = parse_args()
     if not DEFAULT_DATA_PATH.exists():
         raise SystemExit(
-            "Explorer data file is missing. Run `python sap-order-to-cash-dataset/neo4j/build_o2c_graph.py` first."
+            "Frontend graph data file is missing from the service bundle."
         )
 
-    print(f"Serving graph explorer at http://{args.host}:{args.port}/")
-    print(f"FastAPI app directory: {SCRIPT_DIR}")
+    print(f"Serving dAiRaG at http://{args.host}:{args.port}/")
+    print(f"Service root: {SERVICE_ROOT}")
     print(f"Graph data: {DEFAULT_DATA_PATH}")
     print("Press Ctrl+C to stop.")
 
     uvicorn.run(
-        "fastapi_graph_explorer:app",
-        app_dir=str(SCRIPT_DIR),
+        "backend.api:app",
+        app_dir=str(SERVICE_ROOT),
         host=args.host,
         port=args.port,
         reload=args.reload,

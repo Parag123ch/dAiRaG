@@ -2,10 +2,14 @@ const ENTITY_STYLES = {
   Customer: { fill: "#ff6e75", stroke: "#ff9096", text: "#7f2d38" },
   Address: { fill: "#ff9b80", stroke: "#ffb49e", text: "#7a4333" },
   Product: { fill: "#8fb7ff", stroke: "#c2d8ff", text: "#2c518f" },
+  Plant: { fill: "#7ed7b7", stroke: "#c3efdf", text: "#1f6d54" },
   Order: { fill: "#3f82ff", stroke: "#94bcff", text: "#17498f" },
+  SalesOrderItem: { fill: "#47c7c4", stroke: "#baf1ee", text: "#155b5e" },
+  SalesOrderScheduleLine: { fill: "#f0b96d", stroke: "#f7d9ae", text: "#7d5320" },
   Delivery: { fill: "#5fa8ff", stroke: "#b7d5ff", text: "#1f5a94" },
   Invoice: { fill: "#7d9cff", stroke: "#c7d7ff", text: "#334b8c" },
   Payment: { fill: "#a3c4ff", stroke: "#dce9ff", text: "#3f628f" },
+  JournalEntryItem: { fill: "#c8b5ff", stroke: "#e4d9ff", text: "#5a4791" },
 };
 
 const ENTITY_FIELD_PRIORITY = {
@@ -38,6 +42,15 @@ const ENTITY_FIELD_PRIORITY = {
     "net_weight",
     "weight_unit",
   ],
+  Plant: [
+    "plant_id",
+    "plant_name",
+    "valuation_area",
+    "sales_organization",
+    "distribution_channel",
+    "division",
+    "address_id",
+  ],
   Order: [
     "order_id",
     "customer_id",
@@ -47,6 +60,26 @@ const ENTITY_FIELD_PRIORITY = {
     "total_net_amount",
     "requested_delivery_date",
     "overall_delivery_status",
+  ],
+  SalesOrderItem: [
+    "sales_order_item_id",
+    "order_id",
+    "order_item_id",
+    "product_id",
+    "requested_quantity",
+    "requested_quantity_unit",
+    "production_plant",
+    "storage_location",
+  ],
+  SalesOrderScheduleLine: [
+    "schedule_line_id",
+    "sales_order_item_id",
+    "order_id",
+    "order_item_id",
+    "schedule_line",
+    "confirmed_delivery_date",
+    "confirmed_order_quantity",
+    "order_quantity_unit",
   ],
   Delivery: [
     "delivery_id",
@@ -77,16 +110,32 @@ const ENTITY_FIELD_PRIORITY = {
     "posting_date",
     "applied_invoice_count",
   ],
+  JournalEntryItem: [
+    "journal_entry_item_id",
+    "invoice_id",
+    "customer_id",
+    "accounting_document",
+    "accounting_document_item",
+    "gl_account",
+    "transaction_currency",
+    "amount_in_transaction_currency",
+    "clearing_payment_id",
+    "clearing_date",
+  ],
 };
 
 const CLUSTER_LAYOUT = {
   Address: { x: -1040, y: -300, angle: 4.0, spread: 14 },
   Customer: { x: -760, y: -60, angle: 3.0, spread: 18 },
   Order: { x: -330, y: 120, angle: 2.4, spread: 16 },
+  SalesOrderItem: { x: -60, y: 250, angle: 1.95, spread: 14 },
+  SalesOrderScheduleLine: { x: 260, y: 240, angle: 1.45, spread: 13 },
   Delivery: { x: 40, y: -180, angle: 4.9, spread: 15 },
   Invoice: { x: 360, y: -10, angle: 5.8, spread: 17 },
   Payment: { x: 730, y: 250, angle: 0.9, spread: 15 },
+  JournalEntryItem: { x: 980, y: -70, angle: 0.3, spread: 16 },
   Product: { x: 140, y: 330, angle: 1.7, spread: 14 },
+  Plant: { x: 520, y: 360, angle: 1.15, spread: 13 },
 };
 
 const state = {
@@ -109,6 +158,7 @@ const state = {
   ctx: null,
   viewport: { width: 0, height: 0, dpr: 1 },
   camera: { x: 0, y: 0, scale: 1 },
+  fullGraphCamera: null,
   drawCache: { nodes: [], relationships: [] },
   draggingNodeId: null,
   draggingMetadataCard: null,
@@ -117,6 +167,8 @@ const state = {
   lastPointer: null,
   chatMessages: [],
   pendingChat: false,
+  chatHighlightedNodeIds: new Set(),
+  chatHighlightedRelationshipIds: new Set(),
 };
 
 const elements = {};
@@ -335,6 +387,7 @@ function recomputeVisibleRelationships() {
       state.visibleRelationshipIds.add(relationship.id);
     }
   }
+  syncChatHighlightedRelationships();
 }
 
 function visibleNodeSetsMatch(nodeIds) {
@@ -349,6 +402,25 @@ function visibleNodeSetsMatch(nodeIds) {
   }
 
   return true;
+}
+
+function isShowingFullGraph() {
+  return visibleNodeSetsMatch(new Set(state.nodesById.keys()));
+}
+
+function restoreCamera(camera) {
+  if (!camera) {
+    return;
+  }
+  state.camera.x = camera.x ?? state.camera.x;
+  state.camera.y = camera.y ?? state.camera.y;
+  state.camera.scale = camera.scale ?? state.camera.scale;
+}
+
+function rememberFullGraphCamera() {
+  if (isShowingFullGraph()) {
+    state.fullGraphCamera = { ...state.camera };
+  }
 }
 
 function captureViewState() {
@@ -403,9 +475,7 @@ function restoreViewState(snapshot) {
       : null;
 
   if (snapshot.camera) {
-    state.camera.x = snapshot.camera.x ?? state.camera.x;
-    state.camera.y = snapshot.camera.y ?? state.camera.y;
-    state.camera.scale = snapshot.camera.scale ?? state.camera.scale;
+    restoreCamera(snapshot.camera);
   }
 
   syncOverlayToggleButton();
@@ -441,6 +511,15 @@ function showFullGraph(options = {}) {
   updateGraphSummary();
   if (options.fit !== false) {
     fitGraph();
+  }
+}
+
+function resetGraphView() {
+  const alreadyShowingFullGraph = state.viewMode === "global" && isShowingFullGraph();
+  setChatHighlightedNodeIds([]);
+  showFullGraph({ fit: !alreadyShowingFullGraph });
+  if (alreadyShowingFullGraph && state.fullGraphCamera) {
+    restoreCamera(state.fullGraphCamera);
   }
 }
 
@@ -555,6 +634,164 @@ function clearSelection() {
   syncOverlayToggleButton();
   updateMetadataCard();
   updateGraphSummary();
+}
+
+function syncChatHighlightedRelationships() {
+  if (!state.chatHighlightedNodeIds.size) {
+    state.chatHighlightedRelationshipIds = new Set();
+    return;
+  }
+
+  state.chatHighlightedRelationshipIds = new Set(
+    [...state.visibleRelationshipIds].filter((relationshipId) => {
+      const relationship = getRelationship(relationshipId);
+      return (
+        relationship &&
+        state.chatHighlightedNodeIds.has(relationship.source) &&
+        state.chatHighlightedNodeIds.has(relationship.target)
+      );
+    })
+  );
+}
+
+function setChatHighlightedNodeIds(nodeIds = []) {
+  state.chatHighlightedNodeIds = new Set(
+    uniq((nodeIds ?? []).filter((nodeId) => getNode(nodeId)))
+  );
+  syncChatHighlightedRelationships();
+}
+
+function extractEvidenceEntityTypesFromCypher(cypher) {
+  if (!cypher) {
+    return [];
+  }
+
+  return uniq(
+    [...cypher.matchAll(/["']([A-Za-z]+)["']\s+AS\s+entity_type/gi)]
+      .map((match) => match[1])
+      .filter((entityType) => ENTITY_STYLES[entityType] || ENTITY_FIELD_PRIORITY[entityType])
+  );
+}
+
+function metadataTextForNode(node) {
+  return Object.values(node?.metadata ?? {})
+    .filter((value) => value !== null && value !== undefined)
+    .map((value) => String(value).toLowerCase())
+    .join(" ");
+}
+
+function deriveEvidenceNodeIdsFromResponse(response) {
+  const directNodeIds = uniq([
+    ...(response.evidenceNodeIds ?? []),
+    ...(response.revealNodeIds ?? []),
+    response.focusNodeId,
+  ].filter((nodeId) => getNode(nodeId)));
+
+  if (directNodeIds.length) {
+    return directNodeIds;
+  }
+
+  const entityTypes = extractEvidenceEntityTypesFromCypher(response.cypher ?? "");
+  if (!entityTypes.length) {
+    return [];
+  }
+
+  const searchTerm =
+    typeof response.cypherParams?.search_term === "string"
+      ? response.cypherParams.search_term.trim().toLowerCase()
+      : "";
+
+  return [...state.visibleNodeIds].filter((nodeId) => {
+    const node = getNode(nodeId);
+    if (!node || !entityTypes.includes(node.entityType)) {
+      return false;
+    }
+    if (!searchTerm) {
+      return true;
+    }
+    return (
+      String(node.label ?? "").toLowerCase().includes(searchTerm) ||
+      metadataTextForNode(node).includes(searchTerm)
+    );
+  });
+}
+
+function visiblePathNodeIds(startNodeId, endNodeId) {
+  if (
+    !startNodeId ||
+    !endNodeId ||
+    !state.visibleNodeIds.has(startNodeId) ||
+    !state.visibleNodeIds.has(endNodeId)
+  ) {
+    return [];
+  }
+
+  if (startNodeId === endNodeId) {
+    return [startNodeId];
+  }
+
+  const queue = [startNodeId];
+  const visited = new Set([startNodeId]);
+  const previousNodeById = new Map();
+
+  while (queue.length) {
+    const currentNodeId = queue.shift();
+    for (const relationshipId of getAdjacentRelationshipIds(currentNodeId)) {
+      if (!state.visibleRelationshipIds.has(relationshipId)) {
+        continue;
+      }
+      const relationship = getRelationship(relationshipId);
+      if (!relationship) {
+        continue;
+      }
+      const nextNodeId = getOppositeNodeId(relationship, currentNodeId);
+      if (!state.visibleNodeIds.has(nextNodeId) || visited.has(nextNodeId)) {
+        continue;
+      }
+      visited.add(nextNodeId);
+      previousNodeById.set(nextNodeId, currentNodeId);
+      if (nextNodeId === endNodeId) {
+        queue.length = 0;
+        break;
+      }
+      queue.push(nextNodeId);
+    }
+  }
+
+  if (!visited.has(endNodeId)) {
+    return [];
+  }
+
+  const pathNodeIds = [endNodeId];
+  let cursor = endNodeId;
+  while (cursor !== startNodeId) {
+    cursor = previousNodeById.get(cursor);
+    if (!cursor) {
+      return [];
+    }
+    pathNodeIds.push(cursor);
+  }
+
+  pathNodeIds.reverse();
+  return pathNodeIds;
+}
+
+function expandEvidencePathNodeIds(nodeIds, anchorNodeId) {
+  const expandedNodeIds = new Set(
+    uniq((nodeIds ?? []).filter((nodeId) => getNode(nodeId)))
+  );
+
+  if (!anchorNodeId || !expandedNodeIds.has(anchorNodeId)) {
+    return [...expandedNodeIds];
+  }
+
+  for (const nodeId of [...expandedNodeIds]) {
+    for (const pathNodeId of visiblePathNodeIds(anchorNodeId, nodeId)) {
+      expandedNodeIds.add(pathNodeId);
+    }
+  }
+
+  return [...expandedNodeIds];
 }
 
 function visibleNodeCount() {
@@ -863,12 +1100,25 @@ function applyChatResponse(response) {
     if (response.expandFocus) {
       expandNode(response.focusNodeId);
     }
+    setChatHighlightedNodeIds(
+      expandEvidencePathNodeIds(
+        deriveEvidenceNodeIdsFromResponse(response),
+        response.focusNodeId
+      )
+    );
     return;
   }
 
   if (response.viewMode === "global") {
     showFullGraph({ select: false, fit: false });
   }
+
+  setChatHighlightedNodeIds(
+    expandEvidencePathNodeIds(
+      deriveEvidenceNodeIdsFromResponse(response),
+      response.focusNodeId
+    )
+  );
 }
 
 function setChatStatus(isThinking) {
@@ -886,6 +1136,7 @@ async function handleChatSubmit(event) {
   }
 
   state.pendingChat = true;
+  setChatHighlightedNodeIds([]);
   setChatStatus(true);
   elements.chatSubmitButton.disabled = true;
   addChatMessage("user", message);
@@ -906,6 +1157,7 @@ async function handleChatSubmit(event) {
 
 function initializeChat() {
   state.chatMessages = [];
+  setChatHighlightedNodeIds([]);
   setChatStatus(false);
   addChatMessage(
     "assistant",
@@ -1012,6 +1264,9 @@ function drawGraph() {
   const focusNodeIds = selectedFocusNodeIds();
   const relationshipContext = selectedRelationshipContext();
   const granularRelationshipView = state.granularOverlayVisible && !!state.selectedRelationshipId;
+  const chatHighlightedNodeIds = state.chatHighlightedNodeIds;
+  const chatHighlightedRelationshipIds = state.chatHighlightedRelationshipIds;
+  const hasChatEvidence = chatHighlightedNodeIds.size > 0;
 
   for (const relationshipId of state.visibleRelationshipIds) {
     const relationship = getRelationship(relationshipId);
@@ -1033,7 +1288,8 @@ function drawGraph() {
     const isConnectedToSelectedRelationship =
       granularRelationshipView && relationshipContext.connectedRelationshipIds.has(relationshipId);
     const isHovered = relationshipId === state.hoveredRelationshipId;
-    const strokeStyle = isSelected
+    const isChatHighlighted = chatHighlightedRelationshipIds.has(relationshipId);
+    const baseStrokeStyle = isSelected
       ? "rgba(31, 125, 228, 0.95)"
       : isHovered
         ? "rgba(31, 125, 228, 0.72)"
@@ -1048,7 +1304,23 @@ function drawGraph() {
               : granularRelationshipView
                 ? "rgba(102, 180, 255, 0.08)"
               : "rgba(102, 180, 255, 0.22)";
-    const width = isSelected
+    const evidenceStrokeStyle = isSelected
+      ? "rgba(31, 125, 228, 0.95)"
+      : isHovered
+        ? "rgba(31, 125, 228, 0.78)"
+        : isDirectSelectionRelationship
+          ? "rgba(109, 182, 255, 0.78)"
+          : isWithinFocusedNeighborhood
+            ? "rgba(109, 182, 255, 0.62)"
+            : isConnectedToSelectedRelationship
+              ? "rgba(109, 182, 255, 0.64)"
+              : "rgba(102, 180, 255, 0.52)";
+    const strokeStyle = hasChatEvidence
+      ? isChatHighlighted
+        ? evidenceStrokeStyle
+        : "rgba(102, 180, 255, 0.08)"
+      : baseStrokeStyle;
+    const baseWidth = isSelected
       ? 3.4
       : isDirectSelectionRelationship
         ? 2.4
@@ -1057,6 +1329,11 @@ function drawGraph() {
           : isConnectedToSelectedRelationship
             ? 1.8
             : 1;
+    const width = hasChatEvidence
+      ? isChatHighlighted
+        ? Math.max(baseWidth, 1.6)
+        : 0.85
+      : baseWidth;
 
     state.ctx.strokeStyle = strokeStyle;
     state.ctx.lineWidth = width;
@@ -1086,10 +1363,11 @@ function drawGraph() {
     const style = styleForEntity(node.entityType);
     const isSelected = nodeId === state.selectedNodeId;
     const isHovered = nodeId === state.hoveredNodeId;
+    const isChatHighlighted = chatHighlightedNodeIds.has(nodeId);
     const isWithinNodeNeighborhood = !selectedNodeId || focusNodeIds.has(nodeId);
     const isRelationshipEndpoint = relationshipContext.endpointNodeIds.has(nodeId);
     const isConnectedToSelectedRelationship = relationshipContext.connectedNodeIds.has(nodeId);
-    const nodeOpacity = selectedNodeId
+    const baseNodeOpacity = selectedNodeId
       ? isSelected
         ? 1
         : isHovered
@@ -1106,6 +1384,13 @@ function drawGraph() {
               ? 0.92
               : 0.2
         : 1;
+    const nodeOpacity = hasChatEvidence
+      ? isChatHighlighted
+        ? baseNodeOpacity
+        : Math.min(baseNodeOpacity, 0.16)
+      : isChatHighlighted
+        ? Math.max(baseNodeOpacity, 0.98)
+        : baseNodeOpacity;
 
     if (isSelected) {
       state.ctx.beginPath();
@@ -1222,6 +1507,7 @@ function fitGraph() {
   const scaleX = (state.viewport.width - padding) / width;
   const scaleY = (state.viewport.height - padding) / height;
   state.camera.scale = clamp(Math.min(scaleX, scaleY, 1.22), 0.12, 2.2);
+  rememberFullGraphCamera();
 }
 
 function pointerPosition(event) {
@@ -1385,7 +1671,7 @@ function bindEvents() {
     state.granularOverlayVisible = !state.granularOverlayVisible;
     syncOverlayToggleButton();
   });
-  elements.resetViewButton.addEventListener("click", () => showFullGraph());
+  elements.resetViewButton.addEventListener("click", resetGraphView);
   elements.zoomInButton.addEventListener("click", () => zoomFromCenter(1.32));
   elements.zoomOutButton.addEventListener("click", () => zoomFromCenter(1 / 1.32));
   elements.metadataCloseButton.addEventListener("click", () => clearSelection());

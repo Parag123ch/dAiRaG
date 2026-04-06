@@ -11,10 +11,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     load_dotenv = None
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent.parent
+BACKEND_DIR = Path(__file__).resolve().parent
+SERVICE_ROOT = BACKEND_DIR.parent
+REPO_ROOT = SERVICE_ROOT.parent
 ENV_PATHS = [
-    SCRIPT_DIR / '.env',
+    SERVICE_ROOT / '.env',
     REPO_ROOT / '.env',
 ]
 _LOADED_ENV_PATHS: list[str] = []
@@ -60,14 +61,6 @@ def package_installed(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
 
 
-def looks_like_nvidia_api_key(value: str | None) -> bool:
-    return bool((value or '').strip()) and (value or '').strip().startswith('nvapi-')
-
-
-def looks_like_openrouter_api_key(value: str | None) -> bool:
-    return bool((value or '').strip()) and (value or '').strip().startswith('sk-or-v1-')
-
-
 def runtime_status() -> dict[str, object]:
     env_files = load_runtime_env()
     neo4j_uri = os.getenv('NEO4J_URI', 'bolt://127.0.0.1:7687')
@@ -75,29 +68,28 @@ def runtime_status() -> dict[str, object]:
     neo4j_database = os.getenv('NEO4J_DATABASE') or None
     host, port = parse_neo4j_host_port(neo4j_uri)
 
-    openai_package = package_installed('openai')
-    gemini_package = package_installed('google.genai')
     neo4j_driver = package_installed('neo4j')
     dotenv_package = load_dotenv is not None
-    raw_nvidia_key = (os.getenv('NVIDIA_API_KEY') or '').strip()
-    raw_openrouter_key = (os.getenv('OPENROUTER_API_KEY') or '').strip()
-    nvidia_key = looks_like_nvidia_api_key(raw_nvidia_key)
-    openrouter_key = bool(raw_openrouter_key) or looks_like_openrouter_api_key(raw_nvidia_key)
-    openai_key = bool(os.getenv('OPENAI_API_KEY'))
-    gemini_key = bool(os.getenv('GEMINI_API_KEY'))
+    raw_turing_key = (os.getenv('TURING_API_KEY') or '').strip()
+    raw_turing_gw_key = ((os.getenv('TURING_API_GW_KEY') or '0c015800-dcba-448d-94bb-d01a56b0d22c')).strip()
+    raw_turing_authorization = ((os.getenv('TURING_AUTHORIZATION') or 'Basic YWRtaW46VHVyaW5nQDEyMw==')).strip()
+    raw_langfuse_public_key = (os.getenv('LANGFUSE_PUBLIC_KEY') or '').strip()
+    raw_langfuse_secret_key = (os.getenv('LANGFUSE_SECRET_KEY') or '').strip()
+    langfuse_base_url = (os.getenv('LANGFUSE_HOST') or os.getenv('LANGFUSE_BASE_URL') or 'https://cloud.langfuse.com').strip()
+    langfuse_judge_enabled = os.getenv('LANGFUSE_JUDGE_ENABLED', 'true').strip().lower() not in {'0', 'false', 'no'}
+    langfuse_judge_model = os.getenv('LANGFUSE_JUDGE_MODEL') or os.getenv('TURING_ANSWER_MODEL') or os.getenv('TURING_CYPHER_MODEL', os.getenv('TURING_MODEL', 'gpt-4'))
+    turing_key = bool(raw_turing_key)
+    turing_gw_key = bool(raw_turing_gw_key)
+    turing_authorization = bool(raw_turing_authorization)
+    langfuse_public_key = bool(raw_langfuse_public_key)
+    langfuse_secret_key = bool(raw_langfuse_secret_key)
     neo4j_password = bool(os.getenv('NEO4J_PASSWORD'))
     bolt_reachable = tcp_reachable(host, port)
     cypher_ready = neo4j_driver and neo4j_password and bolt_reachable
-    llm_provider = None
-    if openai_package and nvidia_key:
-        llm_provider = 'nvidia'
-    elif openai_package and openrouter_key:
-        llm_provider = 'openrouter'
-    elif gemini_package and gemini_key:
-        llm_provider = 'gemini'
-    elif openai_package and openai_key:
-        llm_provider = 'openai'
+    llm_provider = 'turing' if turing_key and turing_gw_key and turing_authorization else None
     llm_cypher_ready = cypher_ready and llm_provider is not None
+    langfuse_installed = package_installed('langfuse')
+    langfuse_enabled = langfuse_installed and langfuse_public_key and langfuse_secret_key
 
     missing: list[str] = []
     if not neo4j_driver:
@@ -109,33 +101,29 @@ def runtime_status() -> dict[str, object]:
     if not bolt_reachable:
         missing.append('neo4j_server')
     if llm_provider is None:
-        if not gemini_package:
-            missing.append('google_genai_package')
-        if not nvidia_key:
-            missing.append('NVIDIA_API_KEY')
-        if not openrouter_key:
-            missing.append('OPENROUTER_API_KEY')
-        if not gemini_key:
-            missing.append('GEMINI_API_KEY')
-        if not openai_package:
-            missing.append('openai_package')
-        if not openai_key:
-            missing.append('OPENAI_API_KEY')
+        if not turing_key:
+            missing.append('TURING_API_KEY')
+        if not turing_gw_key:
+            missing.append('TURING_API_GW_KEY')
+        if not turing_authorization:
+            missing.append('TURING_AUTHORIZATION')
 
     return {
         'envFilesLoaded': env_files,
         'llmProvider': llm_provider,
-        'nvidiaApiKeyConfigured': nvidia_key,
-        'nvidiaBaseUrl': (os.getenv('NVIDIA_BASE_URL') or 'https://integrate.api.nvidia.com/v1'),
-        'nvidiaModel': os.getenv('NVIDIA_CYPHER_MODEL', os.getenv('NVIDIA_MODEL', 'nvidia/nemotron-3-super-120b-a12b')),
-        'openrouterApiKeyConfigured': openrouter_key,
-        'openrouterKeySource': 'OPENROUTER_API_KEY' if raw_openrouter_key else ('NVIDIA_API_KEY' if looks_like_openrouter_api_key(raw_nvidia_key) else None),
-        'openrouterBaseUrl': (os.getenv('OPENROUTER_BASE_URL') or 'https://openrouter.ai/api/v1'),
-        'openrouterModel': os.getenv('OPENROUTER_CYPHER_MODEL', os.getenv('OPENROUTER_MODEL', 'nvidia/nemotron-3-super-120b-a12b:free')),
-        'geminiPackageInstalled': gemini_package,
-        'geminiApiKeyConfigured': gemini_key,
-        'openaiPackageInstalled': openai_package,
-        'openaiApiKeyConfigured': openai_key,
+        'langfuseSdkInstalled': langfuse_installed,
+        'langfusePublicKeyConfigured': langfuse_public_key,
+        'langfuseSecretKeyConfigured': langfuse_secret_key,
+        'langfuseBaseUrl': langfuse_base_url,
+        'langfuseEnabled': langfuse_enabled,
+        'langfuseJudgeEnabled': langfuse_judge_enabled,
+        'langfuseJudgeModel': langfuse_judge_model,
+        'turingApiKeyConfigured': turing_key,
+        'turingApiGwKeyConfigured': turing_gw_key,
+        'turingAuthorizationConfigured': turing_authorization,
+        'turingBaseUrl': (os.getenv('TURING_BASE_URL') or 'https://kong.turing.com/api/v2/chat'),
+        'turingProviderName': (os.getenv('TURING_PROVIDER') or 'openai'),
+        'turingModel': os.getenv('TURING_CYPHER_MODEL', os.getenv('TURING_MODEL', 'gpt-4')),
         'neo4jDriverInstalled': neo4j_driver,
         'dotenvInstalled': dotenv_package,
         'neo4jPasswordConfigured': neo4j_password,
