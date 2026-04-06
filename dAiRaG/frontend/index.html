@@ -3,106 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Order to Cash Graph Explorer</title>
-    <link rel="stylesheet" href="/static/main.css?v=frontend1" />
+    <title>dAiRaG</title>
   </head>
   <body>
-    <div class="page-shell">
-      <header class="topbar">
-        <div class="topbar__left">
-          <div class="topbar__path">
-            <span class="topbar__title">dAiRaG</span>
-          </div>
-        </div>
-      </header>
-
-      <main class="workspace">
-        <section class="graph-shell">
-          <div id="graphStage" class="graph-stage">
-            <div class="graph-toolbar">
-              <button id="resetViewButton" class="toolbar-button toolbar-button--ghost" type="button">
-                Reset View
-              </button>
-            </div>
-
-            <div class="graph-zoom-controls">
-              <button id="zoomInButton" class="zoom-button" type="button" aria-label="Zoom in">+</button>
-              <button id="zoomOutButton" class="zoom-button" type="button" aria-label="Zoom out">-</button>
-            </div>
-
-            <div id="metadataCard" class="metadata-card hidden">
-              <div id="metadataCardHeader" class="metadata-card__header">
-                <div>
-                  <p id="metadataEyebrow" class="metadata-card__eyebrow"></p>
-                  <h2 id="metadataTitle" class="metadata-card__title"></h2>
-                </div>
-                <button id="metadataCloseButton" class="metadata-card__close" type="button" aria-label="Close">
-                  x
-                </button>
-              </div>
-              <p id="metadataSubtitle" class="metadata-card__subtitle"></p>
-              <dl id="metadataFields" class="metadata-card__fields"></dl>
-              <div class="metadata-card__footer">
-                <div class="metadata-card__actions">
-                  <button id="overlayToggleButton" class="toolbar-button toolbar-button--dark" type="button" hidden>
-                    Show Granular View
-                  </button>
-                  <button id="focusNodeButton" class="toolbar-button toolbar-button--light" type="button" hidden>
-                    Focus Neighborhood
-                  </button>
-                  <button id="unfocusButton" class="toolbar-button toolbar-button--light" type="button" hidden>
-                    Unfocus
-                  </button>
-                  <button id="showAllButton" class="toolbar-button toolbar-button--ghost" type="button">
-                    Show Full Graph
-                  </button>
-                </div>
-                <div id="metadataConnectionsSection" class="metadata-card__connections-section">
-                  <div id="metadataConnectionsLabel" class="metadata-card__connections-label">Connections</div>
-                  <div id="metadataConnections" class="metadata-card__connections"></div>
-                </div>
-              </div>
-            </div>
-
-            <canvas id="graphCanvas"></canvas>
-          </div>
-        </section>
-
-        <aside class="chat-shell">
-          <div class="chat-shell__header">
-            <div>
-              <h2>Chat with dAi</h2>
-            </div>
-          </div>
-
-          <div class="chat-shell__body">
-            <div id="chatScrollBody" class="chat-scroll-body">
-              <div id="chatMessages" class="chat-messages"></div>
-            </div>
-
-            <form id="chatForm" class="chat-composer">
-              <div id="chatStatus" class="chat-composer__status">
-                <span id="chatStatusDot" class="chat-composer__dot"></span>
-                <span id="chatStatusText">dAi is awaiting instructions</span>
-              </div>
-              <label class="chat-composer__label" for="chatInput">Analyze anything</label>
-              <textarea
-                id="chatInput"
-                class="chat-composer__input"
-                placeholder="Ask about an order, invoice, payment, journal entry, customer, or product"
-                rows="4"
-              ></textarea>
-              <div class="chat-composer__actions">
-                <button id="chatSubmitButton" class="chat-composer__submit" type="submit" aria-label="Send message">
-                  <span class="chat-composer__submit-icon" aria-hidden="true">&rarr;</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </aside>
-      </main>
-    </div>
-
-    <script type="module" src="/static/main.js?v=frontend1"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

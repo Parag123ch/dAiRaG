@@ -1,3 +1,5 @@
+dAiRaG/frontend/.vite/
+dAiRaG/frontend/node_modules/
 dataset/
 .vscode/
 dAiRaG/**/__pycache__/
@@ -9,3 +11,4 @@ dataset/sap-o2c-data/
 .env
 .env.*
 !.env.example
+dAiRaG/frontend/dist/

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import defaultdict, deque
 from functools import lru_cache
@@ -21,7 +22,9 @@ from .services.turing_llm_engine import TuringCypherChatEngine
 BACKEND_DIR = Path(__file__).resolve().parent
 SERVICE_ROOT = BACKEND_DIR.parent
 FRONTEND_DIR = SERVICE_ROOT / "frontend"
+FRONTEND_BUILD_DIR = FRONTEND_DIR / "dist"
 GRAPH_DATA_PATH = FRONTEND_DIR / "data" / "graph_data.json"
+SERVE_FRONTEND = os.getenv("DAIRAG_SERVE_FRONTEND", "true").strip().lower() not in {"0", "false", "no"}
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_|-]{2,}")
 STOPWORDS = {
@@ -681,7 +684,8 @@ def active_chat_mode() -> str:
 
 
 app = FastAPI(title="SAP Order to Cash Graph Explorer")
-app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+if SERVE_FRONTEND:
+    app.mount("/static", StaticFiles(directory=FRONTEND_BUILD_DIR), name="static")
 
 
 @app.on_event("shutdown")
@@ -689,9 +693,11 @@ def shutdown_background_clients() -> None:
     shutdown_langfuse()
 
 
-@app.get("/")
-def read_index() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "index.html")
+@app.get("/", response_model=None)
+def read_index() -> FileResponse | dict[str, str]:
+    if not SERVE_FRONTEND:
+        return {"status": "ok", "message": "dAiRaG backend is running in API-only mode."}
+    return FileResponse(FRONTEND_BUILD_DIR / "index.html")
 
 
 @app.get("/api/health")

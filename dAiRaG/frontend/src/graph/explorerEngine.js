@@ -1,232 +1,20 @@
-const ENTITY_STYLES = {
-  Customer: { fill: "#ff6e75", stroke: "#ff9096", text: "#7f2d38" },
-  Address: { fill: "#ff9b80", stroke: "#ffb49e", text: "#7a4333" },
-  Product: { fill: "#8fb7ff", stroke: "#c2d8ff", text: "#2c518f" },
-  Plant: { fill: "#7ed7b7", stroke: "#c3efdf", text: "#1f6d54" },
-  Order: { fill: "#3f82ff", stroke: "#94bcff", text: "#17498f" },
-  SalesOrderItem: { fill: "#47c7c4", stroke: "#baf1ee", text: "#155b5e" },
-  SalesOrderScheduleLine: { fill: "#f0b96d", stroke: "#f7d9ae", text: "#7d5320" },
-  Delivery: { fill: "#5fa8ff", stroke: "#b7d5ff", text: "#1f5a94" },
-  Invoice: { fill: "#7d9cff", stroke: "#c7d7ff", text: "#334b8c" },
-  Payment: { fill: "#a3c4ff", stroke: "#dce9ff", text: "#3f628f" },
-  JournalEntryItem: { fill: "#c8b5ff", stroke: "#e4d9ff", text: "#5a4791" },
-};
-
-const ENTITY_FIELD_PRIORITY = {
-  Customer: [
-    "customer_id",
-    "business_partner_id",
-    "full_name",
-    "business_partner_category",
-    "business_partner_grouping",
-    "last_change_date",
-    "is_blocked",
-    "is_marked_for_archiving",
-  ],
-  Address: [
-    "address_id",
-    "street_name",
-    "city_name",
-    "region",
-    "country",
-    "postal_code",
-    "validity_end_date",
-  ],
-  Product: [
-    "product_id",
-    "product_description",
-    "product_type",
-    "product_group",
-    "base_unit",
-    "gross_weight",
-    "net_weight",
-    "weight_unit",
-  ],
-  Plant: [
-    "plant_id",
-    "plant_name",
-    "valuation_area",
-    "sales_organization",
-    "distribution_channel",
-    "division",
-    "address_id",
-  ],
-  Order: [
-    "order_id",
-    "customer_id",
-    "sales_organization",
-    "distribution_channel",
-    "transaction_currency",
-    "total_net_amount",
-    "requested_delivery_date",
-    "overall_delivery_status",
-  ],
-  SalesOrderItem: [
-    "sales_order_item_id",
-    "order_id",
-    "order_item_id",
-    "product_id",
-    "requested_quantity",
-    "requested_quantity_unit",
-    "production_plant",
-    "storage_location",
-  ],
-  SalesOrderScheduleLine: [
-    "schedule_line_id",
-    "sales_order_item_id",
-    "order_id",
-    "order_item_id",
-    "schedule_line",
-    "confirmed_delivery_date",
-    "confirmed_order_quantity",
-    "order_quantity_unit",
-  ],
-  Delivery: [
-    "delivery_id",
-    "actual_goods_movement_date",
-    "shipping_point",
-    "delivery_priority",
-    "overall_goods_movement_status",
-    "overall_picking_status",
-  ],
-  Invoice: [
-    "invoice_id",
-    "customer_id",
-    "billing_document_type",
-    "billing_document_date",
-    "transaction_currency",
-    "total_net_amount",
-    "accounting_document",
-    "cancelled_invoice_id",
-  ],
-  Payment: [
-    "payment_document",
-    "company_code",
-    "fiscal_year",
-    "customer_id",
-    "transaction_currency",
-    "amount_in_transaction_currency",
-    "clearing_date",
-    "posting_date",
-    "applied_invoice_count",
-  ],
-  JournalEntryItem: [
-    "journal_entry_item_id",
-    "invoice_id",
-    "customer_id",
-    "accounting_document",
-    "accounting_document_item",
-    "gl_account",
-    "transaction_currency",
-    "amount_in_transaction_currency",
-    "clearing_payment_id",
-    "clearing_date",
-  ],
-};
-
-const CLUSTER_LAYOUT = {
-  Address: { x: -1040, y: -300, angle: 4.0, spread: 14 },
-  Customer: { x: -760, y: -60, angle: 3.0, spread: 18 },
-  Order: { x: -330, y: 120, angle: 2.4, spread: 16 },
-  SalesOrderItem: { x: -60, y: 250, angle: 1.95, spread: 14 },
-  SalesOrderScheduleLine: { x: 260, y: 240, angle: 1.45, spread: 13 },
-  Delivery: { x: 40, y: -180, angle: 4.9, spread: 15 },
-  Invoice: { x: 360, y: -10, angle: 5.8, spread: 17 },
-  Payment: { x: 730, y: 250, angle: 0.9, spread: 15 },
-  JournalEntryItem: { x: 980, y: -70, angle: 0.3, spread: 16 },
-  Product: { x: 140, y: 330, angle: 1.7, spread: 14 },
-  Plant: { x: 520, y: 360, angle: 1.15, spread: 13 },
-};
-
-const state = {
-  data: null,
-  nodesById: new Map(),
-  relationshipsById: new Map(),
-  adjacencyByNode: new Map(),
-  visibleNodeIds: new Set(),
-  visibleRelationshipIds: new Set(),
-  layoutByNodeId: new Map(),
-  selectedNodeId: null,
-  selectedRelationshipId: null,
-  hoveredNodeId: null,
-  hoveredRelationshipId: null,
-  granularOverlayVisible: false,
-  viewMode: "global",
-  viewHistory: [],
-  activeFocusNodeId: null,
-  canvas: null,
-  ctx: null,
-  viewport: { width: 0, height: 0, dpr: 1 },
-  camera: { x: 0, y: 0, scale: 1 },
-  fullGraphCamera: null,
-  drawCache: { nodes: [], relationships: [] },
-  draggingNodeId: null,
-  draggingMetadataCard: null,
-  draggingMetadataCardPointerId: null,
-  isPanning: false,
-  lastPointer: null,
-  chatMessages: [],
-  pendingChat: false,
-  chatHighlightedNodeIds: new Set(),
-  chatHighlightedRelationshipIds: new Set(),
-};
-
-const elements = {};
-
-function byId(id) {
-  return document.getElementById(id);
-}
-
-function createElement(tagName, className, text) {
-  const element = document.createElement(tagName);
-  if (className) {
-    element.className = className;
-  }
-  if (text !== undefined) {
-    element.textContent = text;
-  }
-  return element;
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function uniq(values) {
-  return [...new Set(values)];
-}
-
-function getNode(nodeId) {
-  return state.nodesById.get(nodeId) ?? null;
-}
-
-function getRelationship(relationshipId) {
-  return state.relationshipsById.get(relationshipId) ?? null;
-}
-
-function styleForEntity(entityType) {
-  return ENTITY_STYLES[entityType] ?? { fill: "#6f8eb5", stroke: "#d4deee", text: "#39506e" };
-}
-
-function getAdjacentRelationshipIds(nodeId) {
-  return state.adjacencyByNode.get(nodeId) ?? [];
-}
-
-function getOppositeNodeId(relationship, nodeId) {
-  return relationship.source === nodeId ? relationship.target : relationship.source;
-}
-
-function formatCount(value) {
-  return value.toLocaleString();
-}
-
-function displayIdForNode(node) {
-  return String(node.entityId ?? node.id ?? node.label ?? "");
-}
-
-function hasRenderableValue(value) {
-  return value !== undefined && value !== null && value !== "";
-}
+import { CLUSTER_LAYOUT, ENTITY_FIELD_PRIORITY, ENTITY_STYLES } from "./constants.js";
+import {
+  state,
+  elements,
+  byId,
+  createElement,
+  clamp,
+  uniq,
+  getNode,
+  getRelationship,
+  styleForEntity,
+  getAdjacentRelationshipIds,
+  getOppositeNodeId,
+  formatCount,
+  displayIdForNode,
+  hasRenderableValue,
+} from "./runtime.js";
 
 function selectedFocusNodeIds() {
   if (!state.selectedNodeId) {
@@ -1043,53 +831,7 @@ function updateMetadataCard() {
   elements.metadataCard.classList.add("hidden");
 }
 
-function addChatMessage(role, content) {
-  state.chatMessages.push({ role, content });
-  renderChatMessages();
-}
-
-function avatarText(role) {
-  return role === "assistant" ? "dAi" : "yOu";
-}
-
-function renderChatMessages() {
-  const fragment = document.createDocumentFragment();
-
-  for (const message of state.chatMessages) {
-    const wrapper = createElement(`div`, `message message--${message.role}`);
-    const avatar = createElement("div", "message__avatar", avatarText(message.role));
-    const body = createElement("div", "message__body");
-    const meta = createElement("div", "message__meta");
-    meta.append(
-      createElement("span", "message__name", message.role === "assistant" ? "dAi" : "You"),
-      createElement("span", "message__role", message.role === "assistant" ? "Graph Agent" : "")
-    );
-    const bubble = createElement("div", "message__bubble", message.content);
-    body.append(meta, bubble);
-    wrapper.append(avatar, body);
-    fragment.append(wrapper);
-  }
-
-  elements.chatMessages.replaceChildren(fragment);
-  elements.chatScrollBody.scrollTop = elements.chatScrollBody.scrollHeight;
-}
-
-async function postChatMessage(message) {
-  const response = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
-  });
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ detail: "Unknown error" }));
-    throw new Error(payload.detail || `Chat request failed with ${response.status}`);
-  }
-
-  return response.json();
-}
-
-function applyChatResponse(response) {
+export function applyChatResponse(response) {
   if (response.viewMode === "focus" && response.focusNodeId) {
     focusNeighborhood(response.focusNodeId, response.focusDepth ?? 1, { fit: false });
     for (const nodeId of response.revealNodeIds ?? []) {
@@ -1118,50 +860,6 @@ function applyChatResponse(response) {
       deriveEvidenceNodeIdsFromResponse(response),
       response.focusNodeId
     )
-  );
-}
-
-function setChatStatus(isThinking) {
-  elements.chatStatus.classList.toggle("chat-composer__status--thinking", isThinking);
-  elements.chatStatusText.textContent = isThinking
-    ? "dAi is thinking"
-    : "dAi is awaiting instructions";
-}
-
-async function handleChatSubmit(event) {
-  event.preventDefault();
-  const message = elements.chatInput.value.trim();
-  if (!message || state.pendingChat) {
-    return;
-  }
-
-  state.pendingChat = true;
-  setChatHighlightedNodeIds([]);
-  setChatStatus(true);
-  elements.chatSubmitButton.disabled = true;
-  addChatMessage("user", message);
-  elements.chatInput.value = "";
-
-  try {
-    const response = await postChatMessage(message);
-    addChatMessage("assistant", response.reply);
-    applyChatResponse(response);
-  } catch (error) {
-    addChatMessage("assistant", `I ran into an issue while reading the graph: ${error.message}`);
-  } finally {
-    state.pendingChat = false;
-    setChatStatus(false);
-    elements.chatSubmitButton.disabled = false;
-  }
-}
-
-function initializeChat() {
-  state.chatMessages = [];
-  setChatHighlightedNodeIds([]);
-  setChatStatus(false);
-  addChatMessage(
-    "assistant",
-    "Hi! I can help you analyze the Order to Cash process. Ask about an order, invoice, payment, customer, product, or overall flow."
   );
 }
 
@@ -1643,13 +1341,6 @@ function collectElements() {
   elements.metadataConnectionsSection = byId("metadataConnectionsSection");
   elements.metadataConnectionsLabel = byId("metadataConnectionsLabel");
   elements.metadataConnections = byId("metadataConnections");
-  elements.chatMessages = byId("chatMessages");
-  elements.chatScrollBody = byId("chatScrollBody");
-  elements.chatForm = byId("chatForm");
-  elements.chatInput = byId("chatInput");
-  elements.chatSubmitButton = byId("chatSubmitButton");
-  elements.chatStatus = byId("chatStatus");
-  elements.chatStatusText = byId("chatStatusText");
 }
 
 
@@ -1682,12 +1373,6 @@ function bindEvents() {
   });
   elements.unfocusButton.addEventListener("click", () => restorePreviousView());
   elements.showAllButton.addEventListener("click", () => showFullGraph());
-  elements.chatForm.addEventListener("submit", handleChatSubmit);
-  elements.chatInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      handleChatSubmit(event);
-    }
-  });
 
   window.addEventListener("resize", () => {
     resizeCanvas();
@@ -1708,6 +1393,9 @@ async function loadGraph() {
   return response.json();
 }
 
+let explorerMounted = false;
+let animationFrameScheduled = false;
+
 async function init() {
   collectElements();
   state.canvas = elements.graphCanvas;
@@ -1718,15 +1406,25 @@ async function init() {
     prepareGraphData(payload);
   } catch (error) {
     console.error(error);
+    explorerMounted = false;
     return;
   }
 
   resizeCanvas();
   bindEvents();
-  initializeChat();
   syncOverlayToggleButton();
   showFullGraph();
-  animationLoop();
+  if (!animationFrameScheduled) {
+    animationFrameScheduled = true;
+    animationLoop();
+  }
 }
 
-init();
+export async function mountGraphExplorer() {
+  if (explorerMounted) {
+    return undefined;
+  }
+  explorerMounted = true;
+  await init();
+  return undefined;
+}
