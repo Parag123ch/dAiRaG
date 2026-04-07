@@ -584,6 +584,12 @@ class SalesScheduleLookupEngine:
 
 
 @dataclass
+class EvidenceQueryPlan:
+    cypher: str
+    params: dict[str, Any]
+
+
+@dataclass
 class CypherQueryPlan:
     cypher: str
     params: dict[str, Any]
@@ -593,6 +599,11 @@ class CypherQueryPlan:
     view_mode: str = "global"
     expand_focus: bool = False
     focus_depth: int = 0
+    evidence_cypher: str | None = None
+    evidence_params: dict[str, Any] | None = None
+    evidence_builder: Callable[[list[dict[str, Any]]], EvidenceQueryPlan | None] | None = None
+    reveal_evidence_nodes: bool = False
+    reveal_evidence_limit: int = 25
 
 
 class CypherChatError(RuntimeError):
@@ -700,16 +711,14 @@ class CypherChatEngine:
                     focus_entity_type = first["entity_type"]
                     focus_entity_id = first["entity_id"]
 
-            reveal_node_ids = []
-            if focus_entity_type and focus_entity_id:
-                reveal_node_ids.append(self.to_graph_node_id(focus_entity_type, focus_entity_id))
-            for record in records[:8]:
-                entity_type = record.get("entity_type")
-                entity_id = record.get("entity_id")
-                if entity_type and entity_id:
-                    reveal_node_ids.append(self.to_graph_node_id(entity_type, entity_id))
-            reveal_node_ids = [node_id for index, node_id in enumerate(reveal_node_ids) if node_id and node_id not in reveal_node_ids[:index]]
-            evidence_node_ids = self.collect_evidence_node_ids(records, reveal_node_ids)
+            reveal_node_ids = self.build_reveal_node_ids(records, focus_entity_type, focus_entity_id)
+            evidence_node_ids, revealed_evidence_node_ids = self.collect_plan_evidence_node_ids(
+                driver,
+                plan,
+                records,
+                reveal_node_ids,
+            )
+            reveal_node_ids = self.merge_node_ids(reveal_node_ids, revealed_evidence_node_ids)
 
             response = {
                 "reply": plan.render(records),
@@ -731,11 +740,96 @@ class CypherChatEngine:
             )
             return response
 
+    def build_reveal_node_ids(
+        self,
+        records: list[dict[str, Any]],
+        focus_entity_type: str | None,
+        focus_entity_id: str | None,
+        limit: int = 8,
+    ) -> list[str]:
+        reveal_node_ids: list[str] = []
+        if focus_entity_type and focus_entity_id:
+            reveal_node_ids.append(self.to_graph_node_id(focus_entity_type, focus_entity_id))
+        for record in records[:limit]:
+            entity_type = record.get("entity_type")
+            entity_id = record.get("entity_id")
+            if entity_type and entity_id:
+                reveal_node_ids.append(self.to_graph_node_id(str(entity_type), str(entity_id)))
+        return self.merge_node_ids(reveal_node_ids)
+
+    def merge_node_ids(self, *node_id_groups: list[str]) -> list[str]:
+        merged: list[str] = []
+        for node_ids in node_id_groups:
+            for node_id in node_ids or []:
+                if node_id and node_id not in merged:
+                    merged.append(node_id)
+        return merged
+
+    def answer_query_can_double_as_evidence(self, plan: CypherQueryPlan) -> bool:
+        cypher = plan.cypher or ""
+        return bool(
+            re.search(r"AS\s+entity_id", cypher, re.IGNORECASE)
+            or re.search(r"__[A-Za-z_]*entity_id", cypher, re.IGNORECASE)
+            or re.search(r"__[A-Za-z_]*entity_ids", cypher, re.IGNORECASE)
+        )
+
+    def resolve_evidence_plan(
+        self,
+        plan: CypherQueryPlan,
+        records: list[dict[str, Any]],
+    ) -> EvidenceQueryPlan | None:
+        if plan.evidence_builder:
+            try:
+                return plan.evidence_builder(records)
+            except Exception:
+                return None
+        if plan.evidence_cypher:
+            return EvidenceQueryPlan(
+                cypher=plan.evidence_cypher,
+                params=dict(plan.evidence_params if plan.evidence_params is not None else plan.params),
+            )
+        if self.answer_query_can_double_as_evidence(plan):
+            return EvidenceQueryPlan(
+                cypher=plan.cypher,
+                params=dict(plan.params),
+            )
+        return None
+
+    def execute_evidence_plan(self, driver: Any, evidence_plan: EvidenceQueryPlan) -> list[dict[str, Any]]:
+        with driver.session(database=self.database) as session:
+            return session.run(evidence_plan.cypher, evidence_plan.params).data()
+
+    def collect_plan_evidence_node_ids(
+        self,
+        driver: Any,
+        plan: CypherQueryPlan,
+        records: list[dict[str, Any]],
+        reveal_node_ids: list[str],
+    ) -> tuple[list[str], list[str]]:
+        evidence_plan = self.resolve_evidence_plan(plan, records)
+        if not evidence_plan:
+            return CypherChatEngine.collect_evidence_node_ids(self, records, reveal_node_ids), []
+
+        try:
+            evidence_records = self.execute_evidence_plan(driver, evidence_plan)
+        except Exception:
+            return CypherChatEngine.collect_evidence_node_ids(self, records, reveal_node_ids), []
+
+        evidence_node_ids = CypherChatEngine.collect_evidence_node_ids(self, evidence_records, reveal_node_ids)
+        revealed_evidence_node_ids = (
+            evidence_node_ids[: plan.reveal_evidence_limit] if plan.reveal_evidence_nodes else []
+        )
+        return evidence_node_ids, revealed_evidence_node_ids
+
     def plan_message(self, message: str) -> CypherQueryPlan | None:
         typed = self.extract_typed_identifier(message)
         typed_identifiers = self.extract_typed_identifiers(message)
         requested_fields = self.detect_requested_fields(message)
         detected_types = self.detect_entity_types(message)
+
+        ranking_plan = self.plan_product_ranking_query(message)
+        if ranking_plan:
+            return ranking_plan
 
         if not typed:
             text_search_plan = self.plan_product_text_search_query(message)
@@ -765,6 +859,74 @@ class CypherChatEngine:
             return self.plan_generic_lookup(candidate)
 
         return None
+
+    def extract_product_ranking_intent(self, message: str) -> str | None:
+        lower = " ".join(message.lower().split())
+        patterns = (
+            r"\bmost\s+(?:bought|purchased|ordered)\s+products?\b",
+            r"\btop\s+(?:bought|purchased|ordered)\s+products?\b",
+            r"\bbest\s+selling\s+products?\b",
+            r"\bproducts?\s+(?:bought|purchased|ordered)\s+the\s+most\b",
+            r"\bwhich\s+products?\s+(?:is|are)?\s*(?:the\s+)?(?:most\s+bought|most\s+purchased|most\s+ordered|best\s+selling)\b",
+        )
+        return "most_bought" if any(re.search(pattern, lower, re.IGNORECASE) for pattern in patterns) else None
+
+    def plan_product_ranking_query(self, message: str) -> CypherQueryPlan | None:
+        intent = self.extract_product_ranking_intent(message)
+        if intent == "most_bought":
+            return self.plan_most_bought_product_query()
+        return None
+
+    def plan_most_bought_product_query(self) -> CypherQueryPlan:
+        cypher = (
+            "MATCH (invoice:Invoice)-[:BILLS_PRODUCT]->(product:Product) "
+            "WITH product, count(DISTINCT invoice) AS purchase_count "
+            "ORDER BY purchase_count DESC, coalesce(product.product_description, product.product_id) ASC "
+            "LIMIT 1 "
+            "RETURN 'Product' AS entity_type, product.product_id AS entity_id, "
+            "coalesce(product.product_description, product.product_id) AS label, properties(product) AS props, "
+            "purchase_count"
+        )
+
+        def render(records: list[dict[str, Any]]) -> str:
+            if not records:
+                return "I could not determine the most bought product from the graph."
+            top_record = records[0]
+            purchase_count = top_record.get("purchase_count", 0)
+            return (
+                f"The most bought product is {top_record['label']} ({top_record['entity_id']}), "
+                f"ordered {purchase_count} time(s)."
+            )
+
+        def build_evidence(records: list[dict[str, Any]]) -> EvidenceQueryPlan | None:
+            if not records:
+                return None
+            product_id = records[0].get("entity_id")
+            if product_id in (None, ""):
+                return None
+            return EvidenceQueryPlan(
+                cypher=(
+                    "MATCH (product:Product {product_id: $product_id}) "
+                    "MATCH (invoice:Invoice)-[:BILLS_PRODUCT]->(product) "
+                    "OPTIONAL MATCH (payment:Payment)-[:SETTLES]->(invoice) "
+                    "RETURN product.product_id AS Product__entity_id, "
+                    "invoice.invoice_id AS Invoice__entity_id, payment.payment_id AS Payment__entity_id "
+                    "LIMIT 100"
+                ),
+                params={"product_id": product_id},
+            )
+
+        return CypherQueryPlan(
+            cypher=cypher,
+            params={},
+            render=render,
+            view_mode="focus",
+            expand_focus=True,
+            focus_depth=2,
+            evidence_builder=build_evidence,
+            reveal_evidence_nodes=True,
+            reveal_evidence_limit=40,
+        )
 
     def plan_product_text_search_query(self, message: str) -> CypherQueryPlan | None:
         ordered_product_filters = self.extract_ordered_product_description_filters(message)
@@ -1107,11 +1269,19 @@ class CypherChatEngine:
         evidence_node_ids = list(reveal_node_ids)
         for record in records[:25]:
             for key, value in record.items():
-                if not key.endswith("__entity_id") or value in (None, ""):
+                if key.endswith("__entity_id") and value not in (None, ""):
+                    entity_type = key[: -len("__entity_id")]
+                    if entity_type in ENTITY_CONFIG:
+                        evidence_node_ids.append(self.to_graph_node_id(entity_type, str(value)))
                     continue
-                entity_type = key[: -len("__entity_id")]
-                if entity_type in ENTITY_CONFIG:
-                    evidence_node_ids.append(self.to_graph_node_id(entity_type, str(value)))
+                if key.endswith("__entity_ids") and isinstance(value, list):
+                    entity_type = key[: -len("__entity_ids")]
+                    if entity_type not in ENTITY_CONFIG:
+                        continue
+                    for item in value:
+                        if item in (None, ""):
+                            continue
+                        evidence_node_ids.append(self.to_graph_node_id(entity_type, str(item)))
         return [
             node_id
             for index, node_id in enumerate(evidence_node_ids)
@@ -1212,11 +1382,50 @@ class CypherChatEngine:
             summary = " | ".join(f"{record['entity_type']}: {record['total']}" for record in records)
             return f"Current graph counts -> {summary}."
 
-        return CypherQueryPlan(cypher=cypher, params={}, render=render)
+        def build_evidence(_records: list[dict[str, Any]]) -> EvidenceQueryPlan | None:
+            sample_types = [entity_type for entity_type in entity_types if entity_type in ENTITY_CONFIG]
+            if not sample_types:
+                return None
+            projections = [f"null AS {entity_type}__entity_id" for entity_type in sample_types]
+            branches: list[str] = []
+            for entity_type in sample_types:
+                config = ENTITY_CONFIG[entity_type]
+                branch_projections = projections.copy()
+                branch_index = sample_types.index(entity_type)
+                branch_projections[branch_index] = f"n.{config['id_property']} AS {entity_type}__entity_id"
+                branches.append(
+                    f"MATCH (n:{config['label']}) RETURN {', '.join(branch_projections)} LIMIT 25"
+                )
+            return EvidenceQueryPlan(
+                cypher=" UNION ALL ".join(branches),
+                params={},
+            )
+
+        return CypherQueryPlan(cypher=cypher, params={}, render=render, evidence_builder=build_evidence)
 
     def plan_customers_by_ordered_product_query(self, search_terms: str | list[str], count_only: bool) -> CypherQueryPlan:
         search_label = self.format_search_terms(search_terms)
         search_term_groups = self.build_search_term_groups(search_terms)
+        evidence_search_terms = sorted({term for group in search_term_groups for term in group})
+
+        def build_evidence(_records: list[dict[str, Any]]) -> EvidenceQueryPlan:
+            return EvidenceQueryPlan(
+                cypher=(
+                    "MATCH (customer:Customer)-[:PLACED]->(order:Order)-[:CONTAINS_PRODUCT]->(product:Product) "
+                    "WITH customer, collect(DISTINCT order) AS orders, collect(DISTINCT product) AS products "
+                    "WHERE all(term_group IN $search_term_groups WHERE any(product_node IN products WHERE any(search_term IN term_group WHERE toLower(coalesce(product_node.product_description, '')) CONTAINS search_term))) "
+                    "UNWIND orders AS order "
+                    "MATCH (order)-[:CONTAINS_PRODUCT]->(product:Product) "
+                    "WHERE any(search_term IN $evidence_search_terms WHERE toLower(coalesce(product.product_description, '')) CONTAINS search_term) "
+                    "RETURN DISTINCT customer.customer_id AS Customer__entity_id, order.order_id AS Order__entity_id, product.product_id AS Product__entity_id "
+                    "LIMIT 100"
+                ),
+                params={
+                    "search_term_groups": search_term_groups,
+                    "evidence_search_terms": evidence_search_terms,
+                },
+            )
+
         if count_only:
             cypher = (
                 "MATCH (customer:Customer)-[:PLACED]->(:Order)-[:CONTAINS_PRODUCT]->(product:Product) "
@@ -1235,6 +1444,7 @@ class CypherChatEngine:
                 render=render,
                 view_mode="global",
                 focus_depth=0,
+                evidence_builder=build_evidence,
             )
 
         cypher = (
@@ -1267,11 +1477,33 @@ class CypherChatEngine:
             render=render,
             view_mode="global",
             focus_depth=0,
+            evidence_builder=build_evidence,
         )
 
     def plan_orders_by_ordered_product_query(self, search_terms: str | list[str], count_only: bool) -> CypherQueryPlan:
         search_label = self.format_search_terms(search_terms)
         search_term_groups = self.build_search_term_groups(search_terms)
+        evidence_search_terms = sorted({term for group in search_term_groups for term in group})
+
+        def build_evidence(_records: list[dict[str, Any]]) -> EvidenceQueryPlan:
+            return EvidenceQueryPlan(
+                cypher=(
+                    "MATCH (customer:Customer)-[:PLACED]->(order:Order)-[:CONTAINS_PRODUCT]->(product:Product) "
+                    "WITH order, collect(DISTINCT customer) AS customers, collect(DISTINCT product) AS products "
+                    "WHERE all(term_group IN $search_term_groups WHERE any(product_node IN products WHERE any(search_term IN term_group WHERE toLower(coalesce(product_node.product_description, '')) CONTAINS search_term))) "
+                    "UNWIND customers AS customer "
+                    "UNWIND products AS product "
+                    "WITH customer, order, product "
+                    "WHERE any(search_term IN $evidence_search_terms WHERE toLower(coalesce(product.product_description, '')) CONTAINS search_term) "
+                    "RETURN DISTINCT customer.customer_id AS Customer__entity_id, order.order_id AS Order__entity_id, product.product_id AS Product__entity_id "
+                    "LIMIT 100"
+                ),
+                params={
+                    "search_term_groups": search_term_groups,
+                    "evidence_search_terms": evidence_search_terms,
+                },
+            )
+
         if count_only:
             cypher = (
                 "MATCH (:Customer)-[:PLACED]->(order:Order)-[:CONTAINS_PRODUCT]->(product:Product) "
@@ -1290,6 +1522,7 @@ class CypherChatEngine:
                 render=render,
                 view_mode="global",
                 focus_depth=0,
+                evidence_builder=build_evidence,
             )
 
         cypher = (
@@ -1322,11 +1555,24 @@ class CypherChatEngine:
             render=render,
             view_mode="global",
             focus_depth=0,
+            evidence_builder=build_evidence,
         )
 
     def plan_plants_by_product_description_query(self, search_term: str, count_only: bool) -> CypherQueryPlan:
         normalized_search = search_term.strip()
         search_terms = self.build_text_search_variants(normalized_search)
+
+        def build_evidence(_records: list[dict[str, Any]]) -> EvidenceQueryPlan:
+            return EvidenceQueryPlan(
+                cypher=(
+                    "MATCH (product:Product)-[:AVAILABLE_AT_PLANT]->(plant:Plant) "
+                    "WHERE any(search_term IN $search_terms WHERE toLower(coalesce(product.product_description, '')) CONTAINS search_term) "
+                    "RETURN DISTINCT plant.plant_id AS Plant__entity_id, product.product_id AS Product__entity_id "
+                    "LIMIT 100"
+                ),
+                params={"search_terms": search_terms},
+            )
+
         if count_only:
             cypher = (
                 "MATCH (product:Product)-[:AVAILABLE_AT_PLANT]->(plant:Plant) "
@@ -1344,6 +1590,7 @@ class CypherChatEngine:
                 render=render,
                 view_mode="global",
                 focus_depth=0,
+                evidence_builder=build_evidence,
             )
 
         cypher = (
@@ -1381,11 +1628,25 @@ class CypherChatEngine:
             render=render,
             view_mode="global",
             focus_depth=0,
+            evidence_builder=build_evidence,
         )
 
     def plan_invoices_by_product_description_query(self, search_term: str, count_only: bool) -> CypherQueryPlan:
         normalized_search = search_term.strip()
         search_terms = self.build_text_search_variants(normalized_search)
+
+        def build_evidence(_records: list[dict[str, Any]]) -> EvidenceQueryPlan:
+            return EvidenceQueryPlan(
+                cypher=(
+                    "MATCH (invoice:Invoice)-[:BILLS_PRODUCT]->(product:Product) "
+                    "WHERE any(search_term IN $search_terms WHERE toLower(coalesce(product.product_description, '')) CONTAINS search_term) "
+                    "OPTIONAL MATCH (payment:Payment)-[:SETTLES]->(invoice) "
+                    "RETURN DISTINCT invoice.invoice_id AS Invoice__entity_id, product.product_id AS Product__entity_id, payment.payment_id AS Payment__entity_id "
+                    "LIMIT 100"
+                ),
+                params={"search_terms": search_terms},
+            )
+
         if count_only:
             cypher = (
                 "MATCH (invoice:Invoice)-[:BILLS_PRODUCT]->(product:Product) "
@@ -1403,6 +1664,7 @@ class CypherChatEngine:
                 render=render,
                 view_mode="global",
                 focus_depth=0,
+                evidence_builder=build_evidence,
             )
 
         cypher = (
@@ -1433,11 +1695,24 @@ class CypherChatEngine:
             render=render,
             view_mode="global",
             focus_depth=0,
+            evidence_builder=build_evidence,
         )
 
     def plan_product_description_query(self, search_term: str, count_only: bool) -> CypherQueryPlan:
         normalized_search = search_term.strip()
         search_terms = self.build_text_search_variants(normalized_search)
+
+        def build_evidence(_records: list[dict[str, Any]]) -> EvidenceQueryPlan:
+            return EvidenceQueryPlan(
+                cypher=(
+                    "MATCH (product:Product) "
+                    "WHERE any(search_term IN $search_terms WHERE toLower(coalesce(product.product_description, '')) CONTAINS search_term) "
+                    "RETURN DISTINCT product.product_id AS Product__entity_id "
+                    "LIMIT 100"
+                ),
+                params={"search_terms": search_terms},
+            )
+
         if count_only:
             cypher = (
                 "MATCH (n:Product) "
@@ -1457,6 +1732,7 @@ class CypherChatEngine:
                 render=render,
                 view_mode="global",
                 focus_depth=0,
+                evidence_builder=build_evidence,
             )
 
         cypher = (

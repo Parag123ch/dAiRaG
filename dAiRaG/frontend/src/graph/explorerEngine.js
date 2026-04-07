@@ -484,22 +484,37 @@ function deriveEvidenceNodeIdsFromResponse(response) {
     return [];
   }
 
-  const searchTerm =
+  const normalizedSearchTerms = uniq([
     typeof response.cypherParams?.search_term === "string"
       ? response.cypherParams.search_term.trim().toLowerCase()
-      : "";
+      : "",
+    ...((Array.isArray(response.cypherParams?.search_terms)
+      ? response.cypherParams.search_terms
+      : [])
+      .map((term) => String(term).trim().toLowerCase())
+      .filter(Boolean)),
+    ...((Array.isArray(response.cypherParams?.search_term_groups)
+      ? response.cypherParams.search_term_groups.flatMap((group) =>
+          Array.isArray(group)
+            ? group.map((term) => String(term).trim().toLowerCase())
+            : []
+        )
+      : []).filter(Boolean)),
+  ].filter(Boolean));
+
+  if (!normalizedSearchTerms.length) {
+    return [];
+  }
 
   return [...state.visibleNodeIds].filter((nodeId) => {
     const node = getNode(nodeId);
     if (!node || !entityTypes.includes(node.entityType)) {
       return false;
     }
-    if (!searchTerm) {
-      return true;
-    }
-    return (
-      String(node.label ?? "").toLowerCase().includes(searchTerm) ||
-      metadataTextForNode(node).includes(searchTerm)
+    const labelText = String(node.label ?? "").toLowerCase();
+    const metadataText = metadataTextForNode(node);
+    return normalizedSearchTerms.some(
+      (searchTerm) => labelText.includes(searchTerm) || metadataText.includes(searchTerm)
     );
   });
 }
@@ -965,6 +980,8 @@ function drawGraph() {
   const chatHighlightedNodeIds = state.chatHighlightedNodeIds;
   const chatHighlightedRelationshipIds = state.chatHighlightedRelationshipIds;
   const hasChatEvidence = chatHighlightedNodeIds.size > 0;
+  const selectedHighlightedNodeId =
+    selectedNodeId && chatHighlightedNodeIds.has(selectedNodeId) ? selectedNodeId : null;
 
   for (const relationshipId of state.visibleRelationshipIds) {
     const relationship = getRelationship(relationshipId);
@@ -987,6 +1004,10 @@ function drawGraph() {
       granularRelationshipView && relationshipContext.connectedRelationshipIds.has(relationshipId);
     const isHovered = relationshipId === state.hoveredRelationshipId;
     const isChatHighlighted = chatHighlightedRelationshipIds.has(relationshipId);
+    const isAssociatedWithSelectedHighlightedNode =
+      !!selectedHighlightedNodeId &&
+      (relationship.source === selectedHighlightedNodeId ||
+        relationship.target === selectedHighlightedNodeId);
     const baseStrokeStyle = isSelected
       ? "rgba(31, 125, 228, 0.95)"
       : isHovered
@@ -1015,7 +1036,11 @@ function drawGraph() {
               : "rgba(102, 180, 255, 0.52)";
     const strokeStyle = hasChatEvidence
       ? isChatHighlighted
-        ? evidenceStrokeStyle
+        ? selectedHighlightedNodeId
+          ? isAssociatedWithSelectedHighlightedNode
+            ? evidenceStrokeStyle
+            : "rgba(102, 180, 255, 0.12)"
+          : evidenceStrokeStyle
         : "rgba(102, 180, 255, 0.08)"
       : baseStrokeStyle;
     const baseWidth = isSelected
@@ -1029,7 +1054,11 @@ function drawGraph() {
             : 1;
     const width = hasChatEvidence
       ? isChatHighlighted
-        ? Math.max(baseWidth, 1.6)
+        ? selectedHighlightedNodeId
+          ? isAssociatedWithSelectedHighlightedNode
+            ? Math.max(baseWidth, 1.6)
+            : 0.95
+          : Math.max(baseWidth, 1.6)
         : 0.85
       : baseWidth;
 

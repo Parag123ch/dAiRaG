@@ -21,6 +21,7 @@ from .graph_query_engine import (
     TOKEN_PATTERN,
     CypherChatEngine,
     CypherChatError,
+    CypherQueryPlan,
     GraphDatabase,
 )
 
@@ -194,11 +195,15 @@ class LlmCypherPlan(BaseModel):
     refusal_reason: str | None = None
     cypher: str | None = None
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    evidence_cypher: str | None = None
+    evidence_params: dict[str, ParamValue] = Field(default_factory=dict)
     focus_entity_type: str | None = None
     focus_entity_id: str | None = None
     view_mode: Literal["global", "focus"] = "global"
     expand_focus: bool = False
     focus_depth: int = Field(default=0, ge=0, le=4)
+    reveal_evidence_nodes: bool = False
+    reveal_evidence_limit: int = Field(default=25, ge=0, le=100)
 
 
 def _observation_response_summary(response: dict[str, Any]) -> dict[str, Any]:
@@ -360,14 +365,43 @@ class TuringCypherChatEngine(CypherChatEngine):
                 observation.update(output=_observation_response_summary(response))
                 return response
 
+            supported_plan = CypherChatEngine.plan_message(self, message)
             plan = self.plan_message(message)
             refusal = self.guard_plan_against_question(message, plan)
             if refusal:
+                if supported_plan:
+                    response = self.execute_rule_fallback_plan(message, supported_plan)
+                    response["warning"] = (
+                        "The LLM planner could not verify a safe query for this request, so the app used the template query-rewrite and expansion fallback."
+                    )
+                    judge_response(
+                        response["reply"],
+                        response_mode="answer",
+                        cypher_text=response.get("cypher"),
+                        cypher_params=response.get("cypherParams") or {},
+                        result_rows=[],
+                    )
+                    observation.update(output=_observation_response_summary(response))
+                    return response
                 response = self.build_refusal_response(refusal)
                 judge_response(response["reply"], response_mode="refusal")
                 observation.update(output=_observation_response_summary(response))
                 return response
             if not plan.can_answer or not plan.cypher:
+                if supported_plan:
+                    response = self.execute_rule_fallback_plan(message, supported_plan)
+                    response["warning"] = (
+                        "The LLM planner could not build a safe query for this request, so the app used the template query-rewrite and expansion fallback."
+                    )
+                    judge_response(
+                        response["reply"],
+                        response_mode="answer",
+                        cypher_text=response.get("cypher"),
+                        cypher_params=response.get("cypherParams") or {},
+                        result_rows=[],
+                    )
+                    observation.update(output=_observation_response_summary(response))
+                    return response
                 response = self.build_refusal_response(
                     plan.refusal_reason
                     or (
@@ -381,6 +415,8 @@ class TuringCypherChatEngine(CypherChatEngine):
 
             cypher = self.validate_cypher(plan.cypher)
             params = self.sanitize_params(plan.params)
+            evidence_cypher = self.validate_cypher(plan.evidence_cypher) if plan.evidence_cypher else None
+            evidence_params = self.sanitize_params(plan.evidence_params) if plan.evidence_cypher else {}
 
             driver = self._get_driver()
             response_query_mode = "llm_cypher"
@@ -390,7 +426,7 @@ class TuringCypherChatEngine(CypherChatEngine):
             focus_depth = plan.focus_depth
             focus_entity_type = plan.focus_entity_type
             focus_entity_id = plan.focus_entity_id
-            fallback_plan = self.plan_product_text_search_query(message)
+            fallback_search_plan = self.plan_product_text_search_query(message)
             fallback_used = False
             llm_query_error: Exception | None = None
             records: list[dict[str, Any]] = []
@@ -409,8 +445,8 @@ class TuringCypherChatEngine(CypherChatEngine):
                 llm_query_error = exc
 
             can_try_fallback = (
-                fallback_plan is not None
-                and (fallback_plan.cypher != cypher or fallback_plan.params != params)
+                fallback_search_plan is not None
+                and (fallback_search_plan.cypher != cypher or fallback_search_plan.params != params)
                 and (llm_query_error is not None or not records)
             )
             if can_try_fallback:
@@ -418,13 +454,13 @@ class TuringCypherChatEngine(CypherChatEngine):
                     with start_observation(
                         name="neo4j.query",
                         as_type="span",
-                        input={"cypher": fallback_plan.cypher, "params": fallback_plan.params},
+                        input={"cypher": fallback_search_plan.cypher, "params": fallback_search_plan.params},
                         metadata={"engine": "template_fallback", "provider": self.provider},
                     ) as fallback_query_observation:
                         with driver.session(database=self.database) as session:
                             fallback_records = [
                                 self.normalize_record(record)
-                                for record in session.run(fallback_plan.cypher, fallback_plan.params).data()
+                                for record in session.run(fallback_search_plan.cypher, fallback_search_plan.params).data()
                             ]
                         fallback_query_observation.update(output={"recordCount": len(fallback_records)})
                 except Exception as fallback_exc:
@@ -435,8 +471,8 @@ class TuringCypherChatEngine(CypherChatEngine):
                     raise CypherChatError(f"Neo4j query execution failed: {fallback_exc}") from fallback_exc
 
                 records = fallback_records
-                cypher = fallback_plan.cypher
-                params = fallback_plan.params
+                cypher = fallback_search_plan.cypher
+                params = fallback_search_plan.params
                 response_query_mode = "cypher"
                 fallback_used = True
                 if llm_query_error is not None:
@@ -447,11 +483,11 @@ class TuringCypherChatEngine(CypherChatEngine):
                     response_warning = (
                         "The LLM-generated query returned no rows, so the app used the template query-rewrite and expansion fallback."
                     )
-                view_mode = fallback_plan.view_mode
-                expand_focus = fallback_plan.expand_focus
-                focus_depth = fallback_plan.focus_depth
-                focus_entity_type = fallback_plan.focus_entity_type
-                focus_entity_id = fallback_plan.focus_entity_id
+                view_mode = fallback_search_plan.view_mode
+                expand_focus = fallback_search_plan.expand_focus
+                focus_depth = fallback_search_plan.focus_depth
+                focus_entity_type = fallback_search_plan.focus_entity_type
+                focus_entity_id = fallback_search_plan.focus_entity_id
 
             if llm_query_error is not None and not fallback_used:
                 observation.update(output={"error": f"Neo4j query execution failed: {llm_query_error}"})
@@ -465,14 +501,14 @@ class TuringCypherChatEngine(CypherChatEngine):
 
             answer_already_judged = False
             if records:
-                if fallback_plan is not None and response_query_mode == "cypher":
-                    reply = fallback_plan.render(records)
+                if fallback_search_plan is not None and response_query_mode == "cypher":
+                    reply = fallback_search_plan.render(records)
                 else:
                     reply = self.generate_grounded_answer(message, cypher, params, records)
                     answer_already_judged = True
             else:
-                if fallback_plan is not None and response_query_mode == "cypher":
-                    reply = fallback_plan.render([])
+                if fallback_search_plan is not None and response_query_mode == "cypher":
+                    reply = fallback_search_plan.render([])
                 else:
                     reply = "I ran the Cypher query successfully, but it returned no matching records."
 
@@ -485,21 +521,36 @@ class TuringCypherChatEngine(CypherChatEngine):
                     result_rows=records,
                 )
 
-            reveal_node_ids = []
-            if focus_entity_type and focus_entity_id:
-                reveal_node_ids.append(self.to_graph_node_id(focus_entity_type, focus_entity_id))
-            for record in records[:8]:
-                entity_type = record.get("entity_type")
-                entity_id = record.get("entity_id")
-                if entity_type and entity_id:
-                    reveal_node_ids.append(self.to_graph_node_id(str(entity_type), str(entity_id)))
-            reveal_node_ids = [
-                node_id
-                for index, node_id in enumerate(reveal_node_ids)
-                if node_id and node_id not in reveal_node_ids[:index]
-            ]
+            reveal_node_ids = self.build_reveal_node_ids(records, focus_entity_type, focus_entity_id)
+            active_evidence_plan = None
+            if supported_plan is not None:
+                active_evidence_plan = supported_plan if not fallback_used else fallback_search_plan
+            elif response_query_mode == "llm_cypher":
+                active_evidence_plan = CypherQueryPlan(
+                    cypher=cypher,
+                    params=params,
+                    render=lambda _records: "",
+                    focus_entity_type=focus_entity_type,
+                    focus_entity_id=focus_entity_id,
+                    view_mode=view_mode,
+                    expand_focus=expand_focus,
+                    focus_depth=focus_depth,
+                    evidence_cypher=evidence_cypher,
+                    evidence_params=evidence_params,
+                    reveal_evidence_nodes=plan.reveal_evidence_nodes,
+                    reveal_evidence_limit=plan.reveal_evidence_limit,
+                )
 
-            evidence_node_ids = self.collect_evidence_node_ids(driver, cypher, params, reveal_node_ids)
+            if active_evidence_plan is not None:
+                evidence_node_ids, revealed_evidence_node_ids = self.collect_plan_evidence_node_ids(
+                    driver,
+                    active_evidence_plan,
+                    records,
+                    reveal_node_ids,
+                )
+                reveal_node_ids = self.merge_node_ids(reveal_node_ids, revealed_evidence_node_ids)
+            else:
+                evidence_node_ids = self.collect_evidence_node_ids(driver, cypher, params, reveal_node_ids, records)
 
             response = {
                 "reply": reply,
@@ -523,6 +574,44 @@ class TuringCypherChatEngine(CypherChatEngine):
                 metadata={"recordCount": len(records), "responseQueryMode": response_query_mode},
             )
             return response
+
+    def execute_rule_fallback_plan(self, message: str, plan: Any) -> dict[str, Any]:
+            driver = self._get_driver()
+            with driver.session(database=self.database) as session:
+                records = [self.normalize_record(record) for record in session.run(plan.cypher, plan.params).data()]
+
+            focus_entity_type = plan.focus_entity_type
+            focus_entity_id = plan.focus_entity_id
+            if not focus_entity_type and records:
+                first = records[0]
+                if first.get("entity_type") and first.get("entity_id"):
+                    focus_entity_type = first["entity_type"]
+                    focus_entity_id = first["entity_id"]
+
+            reveal_node_ids = self.build_reveal_node_ids(records, focus_entity_type, focus_entity_id)
+            evidence_node_ids, revealed_evidence_node_ids = self.collect_plan_evidence_node_ids(
+                driver,
+                plan,
+                records,
+                reveal_node_ids,
+            )
+            reveal_node_ids = self.merge_node_ids(reveal_node_ids, revealed_evidence_node_ids)
+
+            return {
+                "reply": plan.render(records),
+                "focusNodeId": self.to_graph_node_id(focus_entity_type, focus_entity_id)
+                if focus_entity_type and focus_entity_id
+                else None,
+                "revealNodeIds": reveal_node_ids,
+                "evidenceNodeIds": evidence_node_ids,
+                "viewMode": plan.view_mode,
+                "expandFocus": plan.expand_focus,
+                "focusDepth": plan.focus_depth,
+                "queryMode": "cypher",
+                "cypher": plan.cypher,
+                "cypherParams": plan.params,
+                "llmProvider": self.provider,
+            }
 
     def build_refusal_response(self, reply: str) -> dict[str, Any]:
         return {
@@ -904,7 +993,7 @@ class TuringCypherChatEngine(CypherChatEngine):
                 "cypher": cypher or None,
                 "params": params,
                 "row_count": len(records),
-                "rows": records[:12],
+                "rows": self.prepare_answer_rows(message, records)[:12],
                 "answer": answer,
             }
             return (
@@ -1126,7 +1215,7 @@ class TuringCypherChatEngine(CypherChatEngine):
                     f"{self.planner_instructions()}\n\n"
                     "User question:\n"
                     f"{message}\n\n"
-                    "Return only one JSON object with keys: can_answer, refusal_reason, cypher, params, focus_entity_type, focus_entity_id, view_mode, expand_focus, focus_depth."
+                    "Return only one JSON object with keys: can_answer, refusal_reason, cypher, params, evidence_cypher, evidence_params, focus_entity_type, focus_entity_id, view_mode, expand_focus, focus_depth, reveal_evidence_nodes, reveal_evidence_limit."
                 )
                 payload = self.call_turing_chat(
                     prompt,
@@ -1147,6 +1236,7 @@ class TuringCypherChatEngine(CypherChatEngine):
                             "viewMode": plan.view_mode,
                             "focusEntityType": plan.focus_entity_type,
                             "hasCypher": bool(plan.cypher),
+                            "hasEvidenceCypher": bool(plan.evidence_cypher),
                         }
                     )
                     return plan
@@ -1167,6 +1257,122 @@ class TuringCypherChatEngine(CypherChatEngine):
                     raise
                 return json.loads(match.group(0))
 
+    def is_summary_or_ranking_question(self, message: str) -> bool:
+            normalized = " ".join(message.lower().split())
+            summary_patterns = (
+                r"\bhow many\b",
+                r"\bcount\b",
+                r"\bnumber of\b",
+                r"\bmost\b",
+                r"\bleast\b",
+                r"\btop\b",
+                r"\bhighest\b",
+                r"\blowest\b",
+                r"\bbest selling\b",
+                r"\bmost bought\b",
+                r"\bmost purchased\b",
+                r"\bmost ordered\b",
+            )
+            return any(re.search(pattern, normalized) for pattern in summary_patterns)
+
+    def requested_answer_fields(self, message: str) -> set[str]:
+            normalized = " ".join(message.lower().split())
+            requested: set[str] = set()
+            for keyword, mapped_fields in FIELD_KEYWORD_MAP.items():
+                if re.search(rf"\b{re.escape(keyword)}\b", normalized):
+                    requested.update(mapped_fields)
+            return requested
+
+    def filter_record_properties_for_answer(
+            self,
+            record: dict[str, Any],
+            props: dict[str, Any],
+            requested_fields: set[str],
+            summary_or_ranking: bool,
+            *,
+            props_key: str,
+        ) -> dict[str, Any]:
+            if not isinstance(props, dict) or not props:
+                return {}
+
+            if summary_or_ranking and not requested_fields:
+                return {}
+
+            keep_fields = set(requested_fields)
+            entity_type = str(record.get("entity_type") or "")
+            config = ENTITY_CONFIG.get(entity_type)
+            if config and props_key == "props":
+                keep_fields.add(config["id_property"])
+
+            if not keep_fields:
+                return {}
+
+            return {
+                key: value
+                for key, value in props.items()
+                if key in keep_fields and value not in (None, "")
+            }
+
+    def prepare_answer_rows(self, message: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            requested_fields = self.requested_answer_fields(message)
+            summary_or_ranking = self.is_summary_or_ranking_question(message)
+            prepared_rows: list[dict[str, Any]] = []
+
+            for record in records:
+                prepared: dict[str, Any] = {}
+                for key, value in record.items():
+                    if key == "props" and isinstance(value, dict):
+                        filtered_props = self.filter_record_properties_for_answer(
+                            record,
+                            value,
+                            requested_fields,
+                            summary_or_ranking,
+                            props_key="props",
+                        )
+                        if filtered_props:
+                            prepared[key] = filtered_props
+                        continue
+                    if key == "rel_props" and isinstance(value, dict):
+                        filtered_rel_props = self.filter_record_properties_for_answer(
+                            record,
+                            value,
+                            requested_fields,
+                            summary_or_ranking,
+                            props_key="rel_props",
+                        )
+                        if filtered_rel_props:
+                            prepared[key] = filtered_rel_props
+                        continue
+                    prepared[key] = value
+                prepared_rows.append(prepared)
+
+            return prepared_rows
+
+    def extract_node_ids_from_records(self, records: list[dict[str, Any]]) -> list[str]:
+            node_ids: list[str] = []
+            for record in records:
+                entity_type = record.get("entity_type")
+                entity_id = record.get("entity_id")
+                if entity_type in ENTITY_CONFIG and entity_id not in (None, ""):
+                    node_ids.append(self.to_graph_node_id(str(entity_type), str(entity_id)))
+
+                for key, value in record.items():
+                    if key.endswith("__entity_id") and value not in (None, ""):
+                        entity_type = key[: -len("__entity_id")]
+                        if entity_type in ENTITY_CONFIG:
+                            node_ids.append(self.to_graph_node_id(entity_type, str(value)))
+                        continue
+                    if key.endswith("__entity_ids") and isinstance(value, list):
+                        entity_type = key[: -len("__entity_ids")]
+                        if entity_type not in ENTITY_CONFIG:
+                            continue
+                        for item in value:
+                            if item in (None, ""):
+                                continue
+                            node_ids.append(self.to_graph_node_id(entity_type, str(item)))
+
+            return self.dedupe_node_ids(node_ids)
+
     def generate_grounded_answer(
             self,
             message: str,
@@ -1179,7 +1385,7 @@ class TuringCypherChatEngine(CypherChatEngine):
                 "cypher": cypher,
                 "params": params,
                 "row_count": len(records),
-                "rows": records[:12],
+                "rows": self.prepare_answer_rows(message, records)[:12],
             }
             with start_observation(
                 name="llm.answer",
@@ -1289,6 +1495,8 @@ class TuringCypherChatEngine(CypherChatEngine):
             if plan.can_answer and plan.cypher:
                 try:
                     self.validate_schema_usage(plan.cypher)
+                    if plan.evidence_cypher:
+                        self.validate_schema_usage(plan.evidence_cypher)
                 except CypherChatError as exc:
                     return str(exc)
 
@@ -1364,8 +1572,20 @@ class TuringCypherChatEngine(CypherChatEngine):
             cypher: str,
             params: dict[str, ParamValue],
             reveal_node_ids: list[str],
+            records: list[dict[str, Any]],
         ) -> list[str]:
             evidence_node_ids = [node_id for node_id in reveal_node_ids if node_id]
+            record_node_ids = self.extract_node_ids_from_records(records)
+            evidence_node_ids.extend(record_node_ids)
+            if record_node_ids and (
+                re.search(r"\bCOUNT\s*\(", cypher, re.IGNORECASE)
+                or re.search(r"\bORDER\s+BY\b", cypher, re.IGNORECASE)
+                or re.search(r"\bLIMIT\s+1\b", cypher, re.IGNORECASE)
+            ):
+                evidence_node_ids.extend(
+                    self.collect_product_transactional_evidence(driver, record_node_ids)
+                )
+                return self.dedupe_node_ids(evidence_node_ids)
             evidence_query = self.build_evidence_query(cypher)
             if not evidence_query:
                 return self.dedupe_node_ids(evidence_node_ids)
@@ -1388,6 +1608,45 @@ class TuringCypherChatEngine(CypherChatEngine):
                         continue
                     evidence_node_ids.append(self.to_graph_node_id(entity_type, str(value)))
 
+            return self.dedupe_node_ids(evidence_node_ids)
+
+    def collect_product_transactional_evidence(
+            self,
+            driver: Any,
+            node_ids: list[str],
+        ) -> list[str]:
+            product_ids = [
+                node_id.split(":", 1)[1]
+                for node_id in node_ids
+                if isinstance(node_id, str) and node_id.startswith("Product:") and ":" in node_id
+            ]
+            if not product_ids:
+                return []
+
+            transactional_cypher = (
+                "MATCH (product:Product) WHERE product.product_id IN $product_ids "
+                "MATCH (invoice:Invoice)-[:BILLS_PRODUCT]->(product) "
+                "OPTIONAL MATCH (payment:Payment)-[:SETTLES]->(invoice) "
+                "RETURN DISTINCT product.product_id AS Product__entity_id, "
+                "invoice.invoice_id AS Invoice__entity_id, payment.payment_id AS Payment__entity_id "
+                "LIMIT 100"
+            )
+            evidence_node_ids: list[str] = []
+            try:
+                with driver.session(database=self.database) as session:
+                    evidence_records = [
+                        self.normalize_record(record)
+                        for record in session.run(transactional_cypher, {"product_ids": product_ids}).data()
+                    ]
+            except Exception:
+                return []
+
+            for record in evidence_records:
+                for key, value in record.items():
+                    if key.endswith("__entity_id") and value not in (None, ""):
+                        entity_type = key[: -len("__entity_id")]
+                        if entity_type in ENTITY_CONFIG:
+                            evidence_node_ids.append(self.to_graph_node_id(entity_type, str(value)))
             return self.dedupe_node_ids(evidence_node_ids)
 
     def build_evidence_query(self, cypher: str) -> str | None:
@@ -1512,6 +1771,10 @@ class TuringCypherChatEngine(CypherChatEngine):
                     "view_mode": "global",
                     "expand_focus": False,
                     "focus_depth": 0,
+                    "evidence_cypher": None,
+                    "evidence_params": {},
+                    "reveal_evidence_nodes": False,
+                    "reveal_evidence_limit": 25,
                 }
             )
             example_deliveries = json.dumps(
@@ -1692,6 +1955,10 @@ class TuringCypherChatEngine(CypherChatEngine):
                     "Never invent direct edges that are actually multi-hop process chains.",
                     "Avoid variable names that look like Cypher clauses. Prefer aliases like source_node, target_node, order_node, delivery_node, invoice_node, payment_node.",
                     "For count queries, return rows with columns entity_type and total.",
+                    "Also plan evidence_cypher whenever the answer query is aggregated, ranked, or otherwise loses the supporting path. evidence_cypher must be read-only and return only supporting node identifiers using columns like Customer__entity_id, Order__entity_id, Invoice__entity_id, Payment__entity_id, Product__entity_id, Plant__entity_id, or JournalEntryItem__entity_id.",
+                    "When the answer query already returns the exact supporting nodes, you may set evidence_cypher to null and evidence_params to {}.",
+                    "For ranking or top-k questions, evidence_cypher should traverse the business records that justify the winner instead of returning only the winning entity.",
+                    "Set reveal_evidence_nodes=true only when the UI should reveal evidence nodes beyond the main result nodes; otherwise set it to false. Use reveal_evidence_limit to cap how many evidence nodes should be revealed in the graph.",
                     "For product-name or product-description text search, use case-insensitive matching with toLower(coalesce(product_node.product_description, '')) CONTAINS toLower($search_term).",
                     "Use query rewriting and expansion for compact product phrases when helpful. Treat variants like `lip balm`, `lipbalm`, and `lip-balm` as the same product concept, and do the same for phrases like `face wash` and `facewash`.",
                     "When a user asks for entities that ordered X and Y, build Cypher that requires both product concepts to be present rather than matching either one.",
@@ -1739,6 +2006,8 @@ class TuringCypherChatEngine(CypherChatEngine):
                     "You answer questions about the SAP Order-to-Cash graph using only the supplied Neo4j query results.",
                     "Do not use outside knowledge. If the rows are empty, say that no matching records were found.",
                     "Be concise, grounded, and specific. Mention exact ids or counts when they are available.",
+                    "Answer only what the user asked. Do not volunteer unrelated properties or extra metadata unless the user explicitly requested them or they are required to identify the returned record.",
+                    "For ranking, top-k, count, or most/least questions, prefer the winning entity, id, and count over descriptive metadata.",
                     "If rows include helper columns such as via_delivery_id or via_invoice_id, use them to explain the business path clearly.",
                     "If the user asked for a path or process trace, explain the chain using the returned helper columns rather than inventing extra steps.",
                     "If you make an inference, label it clearly as an inference from the returned rows.",
